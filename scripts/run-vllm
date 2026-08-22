@@ -57,6 +57,13 @@ for assignment in "${VLLM_RUNTIME_ENV[@]}"; do
     export "$assignment"
 done
 
+# vLLM only unlinks its /dev/shm CPU KV offload region on a clean shutdown path
+# that SIGTERM never reaches, so every restart leaks one region. Reclaim the
+# orphans before allocating a new one. A reclamation error is reported but must
+# not keep the engine from serving.
+"$SCRIPT_DIR/reclaim-offload-regions" || \
+    printf 'run-vllm: offload region reclamation failed; continuing\n' >&2
+
 # Preserve the existing fail-fast host checks before taking ownership of the GPUs.
 /usr/bin/nvidia-smi
 /usr/bin/free -h

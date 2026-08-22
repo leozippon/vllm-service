@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Reclaim leaked vLLM CPU KV offload regions.
+#
+# vLLM unlinks /dev/shm/vllm_offload_<engine-id>.mmap only from
+# SharedOffloadRegion.cleanup(), reached through the offloading worker's
+# shutdown() path. A SIGTERM'd or killed engine never gets there, so every
+# ordinary restart leaks one region the size of --kv-offloading-size.
+#
+# The host is shared with other tenants, and deleting a region that is still
+# mapped would corrupt a running engine, so a region is removed only when it is
+# both provably ours and provably orphaned:
+#
+#   ownership  a regular file (not a symlink) named vllm_offload_*.mmap whose
+#              owner is our effective UID. vLLM creates regions mode 0600, so
+#              no other tenant can open one of ours, and /dev/shm is sticky
+#              (mode 1777), so we could not unlink theirs even by mistake.
+#   liveness   no live process holds the path open or mapped. The creating
+#              worker holds its descriptor from os.open(O_CREAT|O_EXCL) until
+#              os.unlink(), and every worker mmaps the region, so a region in
+#              use always appears in /proc/<pid>/fd or /proc/<pid>/maps. Other
+#              tenants' /proc entries are unreadable, but a mode 0600 region
+#              owned by us can only be held open by our own processes, so the
+#              /proc entries we can read cover every holder of every file we
+#              are allowed to remove.
+#
+# Whatever cannot be proven is left in place: nothing proven, nothing removed.
+# The exit status is non-zero only when a removal was attempted and failed.
+
+set -u
+
+OFFLOAD_DIR="${VLLM_OFFLOAD_DIR:-/dev/shm}"
+
+note() { printf 'reclaim-offload-regions: %s\n' "$*"; }
+warn() { printf 'reclaim-offload-regions: %s\n' "$*" >&2; }
+
+if [[ ! -r /proc/self/maps ]]; then
+    warn "/proc is unreadable; no region can be proven orphaned, leaving all in place"
+    exit 0
+fi
+
+shopt -s nullglob
+candidates=("$OFFLOAD_DIR"/vllm_offload_*.mmap)
+shopt -u nullglob
+((${#candidates[@]} > 0)) || exit 0
+
+# Basenames of every offload region currently mapped or held open by a process
+# whose /proc entries we can read.
+in_use=$(
+    {
+        grep -ho 'vllm_offload_[^[:space:]/]*\.mmap' /proc/[0-9]*/maps
+        find /proc/[0-9]*/fd -maxdepth 1 -lname '*/vllm_offload_*.mmap' \
+            -printf '%l\n' | sed 's#.*/##'
+    } 2>/dev/null | sort -u
+)
+
+status=0
+for region in "${candidates[@]}"; do
+    name=${region##*/}
+    if [[ -L "$region" || ! -f "$region" ]]; then
+        note "leaving $name: not a regular file"
+        continue
+    fi
+    if [[ ! -O "$region" ]]; then
+        note "leaving $name: owned by another user"
+        continue
+    fi
+    if grep -qxF -- "$name" <<<"$in_use"; then
+        note "leaving $name: held open or mapped by a live process"
+        continue
+    fi
+    size=$(stat -c '%s' -- "$region" 2>/dev/null) || size=0
+    if rm -f -- "$region"; then
+        note "reclaimed $name ($size bytes)"
+    else
+        warn "failed to remove $region"
+        status=1
+    fi
+done
+exit "$status"
