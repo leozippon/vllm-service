@@ -2,27 +2,8 @@
 
 set -euo pipefail
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
-DEPLOYMENTS_DIR="$REPO_ROOT/config/deployments"
-SELECTOR="$DEPLOYMENTS_DIR/active"
-
-fail() {
-    printf 'run-gateway: %s\n' "$*" >&2
-    exit 1
-}
-
-[[ -r "$SELECTOR" ]] || fail "active deployment selector is not readable: $SELECTOR"
-ACTIVE_DEPLOYMENT=$(<"$SELECTOR")
-[[ "$ACTIVE_DEPLOYMENT" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || \
-    fail "active deployment ID is empty or invalid: $ACTIVE_DEPLOYMENT"
-PROFILE="$DEPLOYMENTS_DIR/$ACTIVE_DEPLOYMENT.conf"
-[[ -r "$PROFILE" ]] || fail "deployment profile is not readable: $PROFILE"
-
-unset VLLM_PYTHON
-# Deployment profiles are trusted shell configuration maintained with this repository.
 # shellcheck source=/dev/null
-source "$PROFILE"
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/_profile.sh"
 
 [[ -n "${VLLM_PYTHON:-}" ]] || fail "VLLM_PYTHON is required in $PROFILE"
 [[ -x "$VLLM_PYTHON" ]] || fail "VLLM_PYTHON is not executable: $VLLM_PYTHON"

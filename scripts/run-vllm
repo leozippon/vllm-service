@@ -2,26 +2,8 @@
 
 set -euo pipefail
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
-DEPLOYMENTS_DIR="$REPO_ROOT/config/deployments"
-SELECTOR="$DEPLOYMENTS_DIR/active"
-
-fail() {
-    printf 'run-vllm: %s\n' "$*" >&2
-    exit 1
-}
-
-[[ -r "$SELECTOR" ]] || fail "active deployment selector is not readable: $SELECTOR"
-ACTIVE_DEPLOYMENT=$(<"$SELECTOR")
-[[ "$ACTIVE_DEPLOYMENT" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || \
-    fail "active deployment ID is empty or invalid: $ACTIVE_DEPLOYMENT"
-PROFILE="$DEPLOYMENTS_DIR/$ACTIVE_DEPLOYMENT.conf"
-[[ -r "$PROFILE" ]] || fail "deployment profile is not readable: $PROFILE"
-
-# Deployment profiles are trusted shell configuration maintained with this repository.
 # shellcheck source=/dev/null
-source "$PROFILE"
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/_profile.sh"
 
 require_value() {
     local name=$1
@@ -51,6 +33,10 @@ require_array VLLM_ARGS
 [[ -n "${VLLM_API_KEY:-}" ]] || fail "VLLM_API_KEY is required in the environment"
 ((${#VLLM_ARGS[@]} > 0)) || fail "VLLM_ARGS must not be empty in $PROFILE"
 
+# VLLM_GPUS is the authority for device selection; an explicit
+# CUDA_VISIBLE_DEVICES in VLLM_RUNTIME_ENV still overrides it below.
+export CUDA_VISIBLE_DEVICES="$VLLM_GPUS"
+
 for assignment in "${VLLM_RUNTIME_ENV[@]}"; do
     [[ "$assignment" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || \
         fail "invalid environment assignment in $PROFILE: $assignment"
@@ -64,10 +50,15 @@ done
 "$SCRIPT_DIR/reclaim-offload-regions" || \
     printf 'run-vllm: offload region reclamation failed; continuing\n' >&2
 
-# Preserve the existing fail-fast host checks before taking ownership of the GPUs.
+# nvidia-smi must fail fast if the driver is unusable; free -h records the host
+# memory state in the journal.
 /usr/bin/nvidia-smi
 /usr/bin/free -h
 
+# VLLM_API_KEY is handed to vLLM through its environment default and never as
+# --api-key: /proc/<pid>/cmdline is world-readable on this shared host, and vLLM
+# echoes its parsed arguments into the journal. Enforcement is asserted at every
+# start instead, by the readiness gate.
 exec /usr/bin/numactl \
     --physcpubind="$VLLM_CPU_AFFINITY" \
     --membind="$VLLM_NUMA_NODES" \

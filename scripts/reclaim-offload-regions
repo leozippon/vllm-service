@@ -25,6 +25,8 @@
 #
 # Whatever cannot be proven is left in place: nothing proven, nothing removed.
 # The exit status is non-zero only when a removal was attempted and failed.
+# VLLM_OFFLOAD_DIR overrides the directory; it exists so the tests never run
+# against the real /dev/shm.
 
 set -u
 
