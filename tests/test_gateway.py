@@ -541,6 +541,46 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorder.last.content, body)
 
 
+    async def test_prompt_logprobs_requests_are_refused(self) -> None:
+        # gateway.client is the _Blocked transport here, so any forwarded
+        # request would fail the test outright.
+        refused = [
+            ("chat/completions", b'{"model": "m", "prompt_logprobs": 0}'),
+            ("chat/completions", b'{"model": "m", "prompt_logprobs": 5}'),
+            ("chat/completions", b'{"model": "m", "echo": true}'),
+            ("completions", b'{"model": "m", "prompt_logprobs": 1}'),
+            ("completions", b'{"model": "m", "echo": true, "logprobs": 1}'),
+        ]
+        for path, body in refused:
+            with self.subTest(path=path, body=body):
+                async with self._gw() as client:
+                    r = await client.post(f"/v1/{path}", headers=AUTH, content=body)
+                self.assertEqual(r.status_code, 400, r.text)
+                self.assertEqual(
+                    r.json()["error"]["type"], "invalid_request_error", r.text
+                )
+                self.assertEqual(gateway._admitted, 0)
+
+        allowed = [
+            # echo alone is harmless on /v1/completions: logprobs defaults to
+            # null there, so the engine is never asked for prompt logprobs.
+            ("completions", b'{"model": "m", "echo": true}'),
+            ("chat/completions", b'{"model": "m", "prompt_logprobs": null}'),
+            ("chat/completions", b'{"model": "m", "logprobs": true}'),
+            ("chat/completions", b'{"model": "m", "messages": [{"content": "echo"}]}'),
+            ("chat/completions", b'not json at all "prompt_logprobs" "echo"'),
+            ("models", b""),
+        ]
+        for path, body in allowed:
+            with self.subTest(path=path, body=body):
+                recorder = _Recorder()
+                _install(recorder)
+                async with self._gw() as client:
+                    r = await client.post(f"/v1/{path}", headers=AUTH, content=body)
+                self.assertEqual(r.status_code, 200, r.text)
+                self.assertEqual(recorder.last.content, body)
+
+
 def _run_gateway_import(env_overrides: dict[str, str]) -> subprocess.CompletedProcess:
     """Import gateway in a clean subprocess with only the given VLLM_* names set."""
 

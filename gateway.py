@@ -6,7 +6,9 @@ model routing: every ``/v1`` request goes to the same upstream deployment.
 - Everything under /v1/ is proxied byte-for-byte, with two deliberate
   exceptions: the Authorization header is replaced with the gateway's own
   upstream credential, and reasoning_effort "high" is mapped to this model's
-  top tier "xhigh" (see README).
+  top tier "xhigh" (see README). Requests that ask the engine for prompt
+  logprobs are refused with a 400 rather than forwarded, because serving one
+  over a long prompt exhausts device memory and kills the engine.
 - Single Bearer key: VLLM_API_KEY from the process environment. systemd loads
   .env through EnvironmentFile=; that is the only place the file is parsed.
 - A bounded in-flight cap is a guard rail against runaway clients, not a
@@ -112,6 +114,14 @@ SKIP_HEADERS = frozenset(
 _EFFORT_KEY = b'"reasoning_effort"'
 _EFFORT_HIGH = b'"high"'
 
+# Asking for prompt logprobs makes the engine skip the prefix cache and
+# re-prefill the whole prompt, materialising a chunk-by-vocabulary logits tensor
+# -- 8192 x 248,320 at this deployment's --max-num-batched-tokens -- which
+# exhausts device memory and terminates the engine. One accidental request has
+# already taken the service down, so it is refused at the door.
+_PROMPT_LOGPROBS_MARKERS = (b'"prompt_logprobs"', b'"echo"')
+_PROMPT_LOGPROBS_ROUTES = ("chat/completions", "completions")
+
 API_KEY = _env("VLLM_API_KEY")
 if not API_KEY:
     raise SystemExit("VLLM_API_KEY is required in the environment")
@@ -201,6 +211,43 @@ def _normalize_effort(body: bytes) -> bytes:
     return json.dumps(payload).encode()
 
 
+def _prompt_logprobs_refused(path: str, body: bytes) -> JSONResponse | None:
+    """Refuse a request that would make the engine compute prompt logprobs.
+
+    Like the reasoning-effort alias, the raw-byte prefilter keeps ordinary
+    traffic from paying for a JSON round trip of a multi-megabyte body.
+    """
+
+    if path not in _PROMPT_LOGPROBS_ROUTES:
+        return None
+    if not any(marker in body for marker in _PROMPT_LOGPROBS_MARKERS):
+        return None
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("prompt_logprobs") is None:
+        # vLLM also derives prompt logprobs from echo: from top_logprobs for
+        # chat completions, which defaults to 0 rather than null and so always
+        # requests them, and from logprobs for completions, which defaults to
+        # null and so only requests them when the client sets it.
+        if not payload.get("echo"):
+            return None
+        if path == "completions" and payload.get("logprobs") is None:
+            return None
+    log.warning("rejected: prompt logprobs requested on /v1/%s", path)
+    return _error(
+        "prompt logprobs are not available on this deployment: the engine "
+        "re-prefills the whole prompt and materialises a chunk-by-vocabulary "
+        "logits tensor for it, which exhausts device memory. Remove "
+        '"prompt_logprobs", and "echo", which requests it implicitly.',
+        "invalid_request_error",
+        400,
+    )
+
+
 async def _upstream_ready() -> bool:
     try:
         r = await client.get("/health", timeout=HEALTH_TIMEOUT)
@@ -254,6 +301,9 @@ async def proxy_v1(path: str, request: Request) -> Response:
     body = await request.body()
     if path == "chat/completions":
         body = _normalize_effort(body)
+    refusal = _prompt_logprobs_refused(path, body)
+    if refusal is not None:
+        return refusal
 
     # Header values are bytes on the wire. Forward them as bytes: httpx encodes
     # str header values as ASCII, so any non-ASCII value would raise.
