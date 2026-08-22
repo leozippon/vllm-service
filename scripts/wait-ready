@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# ExecStartPost gate for vllm.service.
+#
+# Type=simple makes systemd consider the unit started as soon as the process is
+# forked, so a ~4-minute model load looked "active" from its first second and
+# nothing downstream could tell loading from serving. systemd stays in
+# activating/start-post for as long as ExecStartPost runs, so blocking here
+# until the server answers /health gives the unit a real loading state, bounded
+# by TimeoutStartSec.
+#
+# The gate then asserts that the engine rejects an unauthenticated request.
+# run-vllm validates VLLM_API_KEY but hands it over through vLLM's environment
+# default, which it does not control; checking enforcement here is what makes
+# that validation mean something, and it catches an engine that would otherwise
+# serve the model to every user on this shared host without a credential.
+
+set -u
+
+URL="${VLLM_READY_URL:-http://127.0.0.1:8010/health}"
+INTERVAL="${VLLM_READY_INTERVAL_SECONDS:-5}"
+AUTH_URL="${URL%/health}/v1/models"
+
+printf 'wait-ready: waiting for %s (main pid %s)\n' "$URL" "${MAINPID:-unset}"
+
+while ! curl -sf -m 5 "$URL" >/dev/null 2>&1; do
+    # systemd remains in start-post even after the main process dies, so
+    # without this check a crashed load would hold off its own restart for the
+    # whole start timeout.
+    if [[ -n "${MAINPID:-}" ]] && ! kill -0 "$MAINPID" 2>/dev/null; then
+        printf 'wait-ready: vllm exited before becoming ready\n' >&2
+        exit 1
+    fi
+    sleep "$INTERVAL"
+done
+
+printf 'wait-ready: vllm is serving: %s\n' "$URL"
+
+status=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$AUTH_URL" 2>/dev/null) || status=""
+if [[ "$status" != "401" ]]; then
+    printf 'wait-ready: unauthenticated %s returned %s, expected 401\n' \
+        "$AUTH_URL" "${status:-no response}" >&2
+    exit 1
+fi
+printf 'wait-ready: unauthenticated requests are rejected\n'

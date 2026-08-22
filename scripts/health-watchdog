@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Timer-driven liveness watchdog for the single active vLLM deployment.
+#
+# Exit status 0 means the system was healthy this cycle, or was legitimately
+# transitioning and nothing was evaluated. Any failed probe exits non-zero,
+# including one whose restart succeeded: a restart is an intervention, not
+# health, and a permanently non-serving system must never report success.
 
 set -u
 
@@ -8,7 +13,9 @@ UPSTREAM_URL="${VLLM_WATCHDOG_UPSTREAM_URL:-http://127.0.0.1:8010/health}"
 GATEWAY_URL="${VLLM_WATCHDOG_GATEWAY_URL:-http://127.0.0.1:8011/health/live}"
 BACKEND_UNIT="${VLLM_WATCHDOG_BACKEND_UNIT:-vllm.service}"
 GATEWAY_UNIT="${VLLM_WATCHDOG_GATEWAY_UNIT:-vllm-gateway.service}"
-BACKEND_THRESHOLD="${VLLM_WATCHDOG_BACKEND_THRESHOLD:-15}"
+# vllm.service now reports activating for the whole model load, so the backend
+# threshold only debounces a running engine and no longer has to cover startup.
+BACKEND_THRESHOLD="${VLLM_WATCHDOG_BACKEND_THRESHOLD:-3}"
 GATEWAY_THRESHOLD="${VLLM_WATCHDOG_GATEWAY_THRESHOLD:-3}"
 
 validate_threshold() {
@@ -28,6 +35,7 @@ check() {  # <name> <health-url> <service> <threshold>
     local fails=0 state
     local state_file="$STATE_DIR/$name.fails"
     [[ -f "$state_file" ]] && fails=$(<"$state_file")
+    [[ "$fails" =~ ^[0-9]+$ ]] || fails=0
 
     state=$(systemctl --user show -p ActiveState --value "$service" 2>/dev/null || echo unknown)
     if [[ "$state" == activating || "$state" == deactivating || "$state" == reloading ]]; then
@@ -48,17 +56,21 @@ check() {  # <name> <health-url> <service> <threshold>
     if ((fails >= threshold)); then
         printf '%s unhealthy %d consecutive times -> restarting %s\n' \
             "$name" "$threshold" "$service"
-        if systemctl --user restart "$service"; then
+        # --no-block: stopping the backend can take up to TimeoutStopSec, and
+        # waiting for it would leave the gateway unprobed for that long. Safe
+        # because the unit reports activating while it restarts, so the next
+        # cycle skips instead of restarting again.
+        if systemctl --user restart --no-block "$service"; then
+            # Give the service a full threshold window to come back.
             printf '0\n' >"$state_file"
-            return 0
+        else
+            printf '%s restart failed: %s\n' "$name" "$service" >&2
         fi
-        printf '%s restart failed: %s\n' "$name" "$service" >&2
-        return 1
     fi
+    return 1
 }
 
 status=0
-# Backend readiness can remain false for several minutes during a cold load.
 check backend "$UPSTREAM_URL" "$BACKEND_UNIT" "$BACKEND_THRESHOLD" || status=1
 # Probe gateway liveness so backend loading does not recycle a healthy gateway.
 check gateway "$GATEWAY_URL" "$GATEWAY_UNIT" "$GATEWAY_THRESHOLD" || status=1

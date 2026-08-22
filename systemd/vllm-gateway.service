@@ -1,6 +1,10 @@
 [Unit]
 Description=Authenticated OpenAI-compatible vLLM gateway
 After=network.target
+# The gateway exits within a second on a bad .env, and RestartSec=5s keeps the
+# manager default limiter out of reach, so that would loop invisibly forever.
+StartLimitIntervalSec=5min
+StartLimitBurst=5
 
 [Service]
 WorkingDirectory=/Data/lzp/vllm-service

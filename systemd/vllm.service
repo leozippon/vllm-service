@@ -1,11 +1,16 @@
 [Unit]
 Description=vLLM model server
 After=network.target
+# RestartSec=5s spaces attempts too widely for the 10s/5 manager default to ever
+# trip, so a fatal condition would restart forever without entering failed. A
+# ~4-minute crash cycle now trips after five attempts; a fast one in ~25s.
+StartLimitIntervalSec=1h
+StartLimitBurst=5
 
 [Service]
 Restart=always
 RestartSec=5s
-TimeoutStartSec=15min
+TimeoutStartSec=20min
 TimeoutStopSec=10min
 CPUQuota=1600%
 MemoryHigh=112G
@@ -14,6 +19,10 @@ MemorySwapMax=0
 WorkingDirectory=/Data/lzp/vllm-service
 EnvironmentFile=/Data/lzp/vllm-service/.env
 ExecStart=/Data/lzp/vllm-service/scripts/run-vllm
+# Type=simple would report active from the first second of a ~4-minute load.
+# The unit stays in activating/start-post until the engine really serves, which
+# is also what makes TimeoutStartSec above effective.
+ExecStartPost=/Data/lzp/vllm-service/scripts/wait-ready
 
 [Install]
 WantedBy=default.target
