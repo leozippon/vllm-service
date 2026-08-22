@@ -1,0 +1,8 @@
+[Unit]
+Description=vLLM serving health watchdog
+
+[Service]
+Type=oneshot
+WorkingDirectory=/Data/lzp/vllm-service
+EnvironmentFile=/Data/lzp/vllm-service/.env
+ExecStart=/Data/lzp/vllm-service/scripts/health-watchdog

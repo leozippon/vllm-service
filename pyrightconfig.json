@@ -1,0 +1,5 @@
+{
+  "venvPath": "/Data/public/.venvs",
+  "venv": "vllm-runtime-py311",
+  "pythonVersion": "3.11"
+}

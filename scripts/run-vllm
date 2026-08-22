@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+DEPLOYMENTS_DIR="$REPO_ROOT/config/deployments"
+SELECTOR="$DEPLOYMENTS_DIR/active"
+
+fail() {
+    printf 'run-vllm: %s\n' "$*" >&2
+    exit 1
+}
+
+[[ -r "$SELECTOR" ]] || fail "active deployment selector is not readable: $SELECTOR"
+ACTIVE_DEPLOYMENT=$(<"$SELECTOR")
+[[ "$ACTIVE_DEPLOYMENT" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || \
+    fail "active deployment ID is empty or invalid: $ACTIVE_DEPLOYMENT"
+PROFILE="$DEPLOYMENTS_DIR/$ACTIVE_DEPLOYMENT.conf"
+[[ -r "$PROFILE" ]] || fail "deployment profile is not readable: $PROFILE"
+
+# Deployment profiles are trusted shell configuration maintained with this repository.
+# shellcheck source=/dev/null
+source "$PROFILE"
+
+require_value() {
+    local name=$1
+    [[ -n "${!name:-}" ]] || fail "$name is required in $PROFILE"
+}
+
+require_array() {
+    local name=$1 declaration
+    declaration=$(declare -p "$name" 2>/dev/null) || fail "$name is required in $PROFILE"
+    [[ "$declaration" == "declare -a "* ]] || fail "$name must be a Bash array in $PROFILE"
+}
+
+for name in \
+    VLLM_PYTHON \
+    VLLM_MODEL_PATH \
+    VLLM_SERVED_MODEL_NAME \
+    VLLM_GPUS \
+    VLLM_CPU_AFFINITY \
+    VLLM_NUMA_NODES; do
+    require_value "$name"
+done
+require_array VLLM_RUNTIME_ENV
+require_array VLLM_ARGS
+
+[[ -x "$VLLM_PYTHON" ]] || fail "VLLM_PYTHON is not executable: $VLLM_PYTHON"
+[[ -d "$VLLM_MODEL_PATH" ]] || fail "VLLM_MODEL_PATH is not a directory: $VLLM_MODEL_PATH"
+[[ -n "${VLLM_API_KEY:-}" ]] || fail "VLLM_API_KEY is required in the environment"
+((${#VLLM_ARGS[@]} > 0)) || fail "VLLM_ARGS must not be empty in $PROFILE"
+
+for assignment in "${VLLM_RUNTIME_ENV[@]}"; do
+    [[ "$assignment" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || \
+        fail "invalid environment assignment in $PROFILE: $assignment"
+    export "$assignment"
+done
+
+# Preserve the existing fail-fast host checks before taking ownership of the GPUs.
+/usr/bin/nvidia-smi
+/usr/bin/free -h
+
+exec /usr/bin/numactl \
+    --physcpubind="$VLLM_CPU_AFFINITY" \
+    --membind="$VLLM_NUMA_NODES" \
+    "$VLLM_PYTHON" -m vllm.entrypoints.openai.api_server \
+    --model "$VLLM_MODEL_PATH" \
+    --served-model-name "$VLLM_SERVED_MODEL_NAME" \
+    "${VLLM_ARGS[@]}"

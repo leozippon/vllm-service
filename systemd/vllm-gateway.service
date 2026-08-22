@@ -1,0 +1,13 @@
+[Unit]
+Description=Authenticated OpenAI-compatible vLLM gateway
+After=network.target
+
+[Service]
+WorkingDirectory=/Data/lzp/vllm-service
+EnvironmentFile=/Data/lzp/vllm-service/.env
+ExecStart=/Data/lzp/vllm-service/scripts/run-gateway
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

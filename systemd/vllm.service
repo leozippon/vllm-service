@@ -1,0 +1,19 @@
+[Unit]
+Description=vLLM model server
+After=network.target
+
+[Service]
+Restart=always
+RestartSec=5s
+TimeoutStartSec=15min
+TimeoutStopSec=10min
+CPUQuota=1600%
+MemoryHigh=112G
+MemoryMax=128G
+MemorySwapMax=0
+WorkingDirectory=/Data/lzp/vllm-service
+EnvironmentFile=/Data/lzp/vllm-service/.env
+ExecStart=/Data/lzp/vllm-service/scripts/run-vllm
+
+[Install]
+WantedBy=default.target

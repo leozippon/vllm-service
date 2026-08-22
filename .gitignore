@@ -1,0 +1,14 @@
+# Local credentials
+.env
+.env.*
+!.env.example
+
+# Pi task artifacts
+.pi/tasks/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

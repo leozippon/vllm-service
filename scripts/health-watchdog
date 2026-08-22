@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Timer-driven liveness watchdog for the single active vLLM deployment.
+
+set -u
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/vllm-watchdog"
+UPSTREAM_URL="${VLLM_WATCHDOG_UPSTREAM_URL:-http://127.0.0.1:8010/health}"
+GATEWAY_URL="${VLLM_WATCHDOG_GATEWAY_URL:-http://127.0.0.1:8011/health/live}"
+BACKEND_UNIT="${VLLM_WATCHDOG_BACKEND_UNIT:-vllm.service}"
+GATEWAY_UNIT="${VLLM_WATCHDOG_GATEWAY_UNIT:-vllm-gateway.service}"
+BACKEND_THRESHOLD="${VLLM_WATCHDOG_BACKEND_THRESHOLD:-15}"
+GATEWAY_THRESHOLD="${VLLM_WATCHDOG_GATEWAY_THRESHOLD:-3}"
+
+validate_threshold() {
+    local name=$1 value=$2
+    [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
+        printf '%s must be a positive integer, got %s\n' "$name" "$value" >&2
+        exit 2
+    }
+}
+
+validate_threshold VLLM_WATCHDOG_BACKEND_THRESHOLD "$BACKEND_THRESHOLD"
+validate_threshold VLLM_WATCHDOG_GATEWAY_THRESHOLD "$GATEWAY_THRESHOLD"
+mkdir -p "$STATE_DIR"
+
+check() {  # <name> <health-url> <service> <threshold>
+    local name=$1 url=$2 service=$3 threshold=$4
+    local fails=0 state
+    local state_file="$STATE_DIR/$name.fails"
+    [[ -f "$state_file" ]] && fails=$(<"$state_file")
+
+    state=$(systemctl --user show -p ActiveState --value "$service" 2>/dev/null || echo unknown)
+    if [[ "$state" == activating || "$state" == deactivating || "$state" == reloading ]]; then
+        printf '%s skip (%s)\n' "$name" "$state"
+        return 0
+    fi
+
+    if curl -sf -m 10 "$url" >/dev/null 2>&1; then
+        ((fails > 0)) && printf '%s recovered after %d failure(s)\n' "$name" "$fails"
+        printf '0\n' >"$state_file"
+        return 0
+    fi
+
+    fails=$((fails + 1))
+    printf '%d\n' "$fails" >"$state_file"
+    printf '%s health check failed (%d/%d)\n' "$name" "$fails" "$threshold"
+
+    if ((fails >= threshold)); then
+        printf '%s unhealthy %d consecutive times -> restarting %s\n' \
+            "$name" "$threshold" "$service"
+        if systemctl --user restart "$service"; then
+            printf '0\n' >"$state_file"
+            return 0
+        fi
+        printf '%s restart failed: %s\n' "$name" "$service" >&2
+        return 1
+    fi
+}
+
+status=0
+# Backend readiness can remain false for several minutes during a cold load.
+check backend "$UPSTREAM_URL" "$BACKEND_UNIT" "$BACKEND_THRESHOLD" || status=1
+# Probe gateway liveness so backend loading does not recycle a healthy gateway.
+check gateway "$GATEWAY_URL" "$GATEWAY_UNIT" "$GATEWAY_THRESHOLD" || status=1
+exit "$status"
