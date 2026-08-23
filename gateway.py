@@ -5,8 +5,8 @@ model routing: every ``/v1`` request goes to the same upstream deployment.
 
 - Everything under /v1/ is proxied byte-for-byte, with two deliberate
   exceptions: the Authorization header is replaced with the gateway's own
-  upstream credential, and reasoning_effort "high" is mapped to this model's
-  top tier "xhigh" (see README). Requests that ask the engine for prompt
+  upstream credential, and one reasoning_effort value is renamed if the active
+  deployment configures an alias. Requests that ask the engine for prompt
   logprobs are refused with a 400 rather than forwarded, because serving one
   over a long prompt exhausts device memory and kills the engine.
 - Single Bearer key: VLLM_API_KEY from the process environment. systemd loads
@@ -16,7 +16,7 @@ model routing: every ``/v1`` request goes to the same upstream deployment.
   successful stream holds its slot until the stream ends, the client
   disconnects, or an error occurs.
 
-Run:  uvicorn gateway:app --host 127.0.0.1 --port 8011
+Run:  scripts/run-gateway
 """
 
 from __future__ import annotations
@@ -107,12 +107,22 @@ SKIP_HEADERS = frozenset(
     )
 )
 
-# OpenAI names the model's top reasoning tier "high"; this model's chat
-# template names it "xhigh" and rejects "high" outright. Alias the one value
-# both enumerations use for the maximum. "minimal" has no counterpart here and
-# is deliberately left to fail with the template's own message.
+# OpenAI names a model's top reasoning tier "high"; a chat template may name it
+# something else and reject "high" outright. That is a property of the served
+# model rather than of the gateway, so the deployment profile configures the
+# alias and run-gateway hands it over. Unset means forward reasoning_effort
+# untouched, which is right for a template that accepts OpenAI's own names.
+# Values with no counterpart are deliberately left to fail with the template's
+# own message.
 _EFFORT_KEY = b'"reasoning_effort"'
-_EFFORT_HIGH = b'"high"'
+EFFORT_ALIAS = _env("VLLM_GATEWAY_REASONING_EFFORT_ALIAS")
+if EFFORT_ALIAS and not re.fullmatch(r"[^:\s]+:[^:\s]+", EFFORT_ALIAS):
+    raise SystemExit(
+        "VLLM_GATEWAY_REASONING_EFFORT_ALIAS must be <from>:<to>, got "
+        f"{EFFORT_ALIAS!r}"
+    )
+EFFORT_FROM, _, EFFORT_TO = EFFORT_ALIAS.partition(":")
+_EFFORT_FROM_JSON = json.dumps(EFFORT_FROM).encode()
 
 # Asking for prompt logprobs makes the engine skip the prefix cache and
 # re-prefill the whole prompt, materialising a chunk-by-vocabulary logits tensor
@@ -191,23 +201,28 @@ def _error(
 
 
 def _normalize_effort(body: bytes) -> bytes:
-    """Map OpenAI's top reasoning tier onto this model's spelling.
+    """Rename one reasoning tier to the spelling this model's template expects.
 
     The scan is a substring test on raw bytes so that ordinary traffic -- which
-    already sends "xhigh", and cannot match the leading quote of ``"high"`` --
-    never pays for a JSON round trip of a multi-megabyte body.
+    already sends the model's own name, and cannot match the leading quote of
+    the aliased value -- never pays for a JSON round trip of a multi-megabyte
+    body.
     """
 
-    if _EFFORT_KEY not in body or _EFFORT_HIGH not in body:
+    if not EFFORT_FROM:
+        return body
+    if _EFFORT_KEY not in body or _EFFORT_FROM_JSON not in body:
         return body
     try:
         payload = json.loads(body)
     except ValueError:
         return body
-    if not isinstance(payload, dict) or payload.get("reasoning_effort") != "high":
+    if not isinstance(payload, dict):
         return body
-    payload["reasoning_effort"] = "xhigh"
-    log.info('reasoning_effort "high" mapped to "xhigh"')
+    if payload.get("reasoning_effort") != EFFORT_FROM:
+        return body
+    payload["reasoning_effort"] = EFFORT_TO
+    log.info('reasoning_effort "%s" mapped to "%s"', EFFORT_FROM, EFFORT_TO)
     return json.dumps(payload).encode()
 
 

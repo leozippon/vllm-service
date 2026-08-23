@@ -13,6 +13,11 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/_profile.sh"
 # upstream the gateway proxies to, which is what a remote engine would need.
 export VLLM_GATEWAY_UPSTREAM_URL="${VLLM_GATEWAY_UPSTREAM_URL:-http://127.0.0.1:$VLLM_PORT}"
 
+# The reasoning-effort alias is a fact about the served model's chat template,
+# so it travels with the deployment profile rather than with the machine: a
+# deployment switch must not leave a previous model's spelling behind.
+export VLLM_GATEWAY_REASONING_EFFORT_ALIAS="${VLLM_GATEWAY_REASONING_EFFORT_ALIAS:-}"
+
 cd -- "$REPO_ROOT"
 exec "$VLLM_PYTHON" -m uvicorn gateway:app \
     --host 127.0.0.1 --port "$((VLLM_PORT + 1))"

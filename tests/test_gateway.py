@@ -21,6 +21,7 @@ os.environ["VLLM_GATEWAY_UPSTREAM_URL"] = CONFIGURED_UPSTREAM
 os.environ["VLLM_GATEWAY_MAX_CONCURRENCY"] = "1"
 os.environ["VLLM_GATEWAY_MAX_QUEUE"] = "1"
 os.environ["VLLM_GATEWAY_QUEUE_TIMEOUT_SECONDS"] = "0.3"
+os.environ["VLLM_GATEWAY_REASONING_EFFORT_ALIAS"] = "high:xhigh"
 
 import httpx
 
@@ -581,20 +582,22 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(recorder.last.content, body)
 
 
-def _run_gateway_import(env_overrides: dict[str, str]) -> subprocess.CompletedProcess:
+DEFAULTS_EXPR = (
+    "print(gateway.MAX_CONCURRENCY, gateway.MAX_QUEUE,"
+    " gateway.QUEUE_TIMEOUT_SECONDS, gateway.READ_TIMEOUT_SECONDS,"
+    " gateway.UPSTREAM_BASE == gateway.DEFAULT_UPSTREAM_BASE)"
+)
+
+
+def _run_gateway_import(
+    env_overrides: dict[str, str], expr: str = DEFAULTS_EXPR
+) -> subprocess.CompletedProcess:
     """Import gateway in a clean subprocess with only the given VLLM_* names set."""
 
     env = {k: v for k, v in os.environ.items() if not k.startswith("VLLM_")}
     env.update(env_overrides)
     return subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import gateway;"
-            "print(gateway.MAX_CONCURRENCY, gateway.MAX_QUEUE,"
-            " gateway.QUEUE_TIMEOUT_SECONDS, gateway.READ_TIMEOUT_SECONDS,"
-            " gateway.UPSTREAM_BASE == gateway.DEFAULT_UPSTREAM_BASE)",
-        ],
+        [sys.executable, "-c", f"import gateway;{expr}"],
         cwd=REPO_ROOT,
         env=env,
         check=False,
@@ -625,6 +628,27 @@ class ConfigurationTests(unittest.TestCase):
                 done = _run_gateway_import(env)
                 self.assertNotEqual(done.returncode, 0, done.stdout)
                 self.assertIn(expected, done.stderr)
+
+    def test_effort_alias_is_configuration_not_a_constant(self) -> None:
+        # Unset -- the right default for a template that accepts OpenAI's own
+        # names -- forwards reasoning_effort untouched.
+        body = b'{"reasoning_effort": "high"}'
+        done = _run_gateway_import(
+            {"VLLM_API_KEY": "test-key"},
+            expr=f"print(gateway._normalize_effort({body!r}) == {body!r})",
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(), "True")
+
+        # A malformed alias fails fast rather than silently not aliasing.
+        done = _run_gateway_import(
+            {
+                "VLLM_API_KEY": "test-key",
+                "VLLM_GATEWAY_REASONING_EFFORT_ALIAS": "high",
+            }
+        )
+        self.assertNotEqual(done.returncode, 0, done.stdout)
+        self.assertIn("REASONING_EFFORT_ALIAS must be <from>:<to>", done.stderr)
 
     def test_missing_api_key_fails_fast(self) -> None:
         # Also the regression guard for reading configuration from the process
