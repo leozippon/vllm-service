@@ -8,7 +8,7 @@ engine-killing `27000000000` to the production `26000000000` before the first bo
 used 27000000000**.
 
 Part 1 (what `--calculate-kv-scales` does, and whether any calibrated FP8 KV route exists) is in
-`PHASE3-CALIBRATION.md`.
+`PHASE3_CALIBRATION.md`.
 
 ## Noise floors, re-measured on this backend
 
@@ -304,6 +304,10 @@ The only question left is whether to waive it on evidence. What the evidence say
   BF16 precision does
 
 ## Recommendation: this is a judgement call, and here are the two options
+
+**Phase 4 settled it.** Option B was adopted on 2026-08-23 on the paired evidence in `PHASE4_RESULTS.md`,
+which measured the two things this section says do not exist. "What is running now" below is Phase 3's
+state, not today's.
 
 I am **not adopting FP8 unilaterally**, and I have left production on BF16. But the reason has moved.
 Phase 2 framed this as a workload-weighting trade — throughput for the agents versus latency for the

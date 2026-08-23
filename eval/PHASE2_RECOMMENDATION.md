@@ -1,4 +1,13 @@
-# The recommended final configuration, measured
+# Phase 2's recommended configuration, measured — superseded
+
+This is what Phase 2 recommended on 2026-08-22. It is **not** what production runs. Phase 3 and
+Phase 4 overturned the precision half of it: the KV cache is now `fp8_e4m3`, which selects the
+FlashInfer backend, and `--kv-cache-memory-bytes` was removed so the pool is engine-sized at 0.92.
+What the current configuration is, and the evidence for it, is `PHASE4_RESULTS.md`; the deployment
+profile selected by `config/deployments/active` is the authority for what is actually running.
+
+What survives here is the pool-sizing argument — why `27000000000` over-commits this device — which
+is why no later phase raised the pool again.
 
 ```
 --kv-cache-dtype auto              (BF16 KV)
@@ -28,7 +37,7 @@ requested memory, or `--kv-cache-memory=26055386624` (24.27 GiB) to fully utiliz
 the engine's own peak-activation estimate. It survived Phase 1 because BF16 never demanded the
 peak and the transient at the same moment; it did **not** survive Phase 2, where a 956 MiB
 `prompt_logprobs` logits allocation on the FP8 path found the missing GiB and killed the engine
-with `EngineDeadError` (`PHASE2-INCIDENT-fp8pth-oom.md`). The mechanism is not FP8-specific.
+with `EngineDeadError` (`~/vllm-study-results/PHASE2-INCIDENT-fp8pth-oom.md`). The mechanism is not FP8-specific.
 
 `26,000,000,000` sits just under the engine's own anchor and restores roughly 1 GiB of reserve.
 

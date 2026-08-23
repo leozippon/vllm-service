@@ -110,7 +110,7 @@ recompile accuracy floor and 10/10 conformance, for a 4% capacity cost. One load
 
 ## Two defects found
 
-- **`/dev/shm` offload-region leak** (`PHASE2-INCIDENT-shm-leak.md`). vLLM 0.27.1 never unlinks
+- **`/dev/shm` offload-region leak** (`~/vllm-study-results/PHASE2-INCIDENT-shm-leak.md`). vLLM 0.27.1 never unlinks
   `/dev/shm/vllm_offload_<engine_id>.mmap` (34.32 GB at `--kv-offloading-size 32`). Eight orphans
   had accumulated to 274.6 GB, filled a 252 GB `/dev/shm`, drove node-1 free memory to 2 GB and
   host-OOM-killed a boot. Reclaimed; the Phase-2 harness now sweeps before each start, but the
@@ -123,7 +123,7 @@ recompile accuracy floor and 10/10 conformance, for a 4% capacity cost. One load
 
 ## Recommended configuration
 
-See `FINAL-CONFIG.md`. In short: keep BF16 KV and FLASH_ATTN, change
+See `PHASE2_RECOMMENDATION.md`, which Phase 4 has since superseded. In short: keep BF16 KV and FLASH_ATTN, change
 `--kv-cache-memory-bytes` from `27000000000` to **`26000000000`**, keep `--kv-offloading-size 32`
 (cell L3 proved it reads). Verified numerically identical to the Phase-1 BF16 reference
 (0.000000 drift, 0 flips on 40,429 + 20,296 positions), 10/10 conformance, and load
