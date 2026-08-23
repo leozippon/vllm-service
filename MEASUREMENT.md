@@ -1,6 +1,6 @@
 # MEASUREMENT
 
-The trade-study harness in `eval/` is how any change to the engine configuration is judged. This document is the standing rule for using it truthfully: what has to be held constant, which numbers are statistics, what each accuracy tier can and cannot resolve, and what none of them measure. The measured results themselves are the phase documents alongside the harness; operating procedure is in `README.md`, and dated history in `LOGBOOK.md`.
+Measuring the engine is how any change to its configuration is judged, and the harness in `eval/` does most of that measuring. This document is the standing rule for doing it truthfully: what has to be held constant, which numbers are statistics, what each accuracy tier can and cannot resolve, and what is still unmeasured. The measured results themselves are the phase documents alongside the harness; operating procedure is in `README.md`, and dated history in `LOGBOOK.md`.
 
 ## The instrument
 
@@ -22,7 +22,7 @@ Rebuilding the corpus changes its sha and invalidates every existing reference, 
 
 The harness talks to the engine on loopback (port 8010 on this deployment), never through the gateway. There are two reasons for that, and both matter.
 
-Load through the gateway measures the gateway's admission control — four in flight, eight waiting — rather than the engine.
+Load through the gateway measures the gateway as much as the engine. Its admission limits — thirty-two requests in flight and thirty-two more waiting by default — are host-local policy that `.env` can change without the engine moving at all, and every request pays a proxy hop on the way through. A capture taken through it is not comparable with one taken beside it.
 
 Accuracy needs `prompt_logprobs`, and the gateway refuses `prompt_logprobs` and `echo` with a 400 because one such request can kill the engine. Requesting prompt logprobs sets `skip_reading_prefix_cache`, so the whole prompt is re-prefilled in `max-num-batched-tokens` chunks and the model runner materialises a `chunk x vocab` logits tensor. An ordinary authenticated request with an ~8k-token prompt allocates about 3.6 GiB that way and takes the engine down with `EngineDeadError`; this happened once, unintentionally, at the start of the study, and the same allocation later found the missing gigabyte on a KV pool that had been over-committed by 944 MB past the engine's own anchor.
 
@@ -79,21 +79,29 @@ Run each configuration at least twice on one boot with different prefix salts an
 
 Do not report a difference smaller than its tier's half-width as a finding. The FP8 increment over a recompile on the trace tier was +0.18 pp against a ±0.20 pp resolution limit — that is at the limit, not measured.
 
-Only the needle grid and the conformance checks score against ground truth. Every teacher-forced tier measures agreement with a reference engine, so it can say that a change moved the model and cannot say the result is worse.
+Among these tiers, only the needle grid and the conformance checks score against ground truth. Every teacher-forced tier measures agreement with a reference engine, so it can say that a change moved the model and cannot say the result is worse — which is why the free-generation correctness tier below had to exist.
 
-## What no phase measured
+## What is measured beyond the tiers, and what is still not
 
-Two gaps are open, and no configuration decision should be described as fully evidenced while they are.
+Every tier above is prefill plus one token or a short retrieval answer, so until Phase 4 nothing in this harness scored free generation at all — the load run generates freely, but only times it. Phase 4 closed both gaps, with instruments that are not part of `eval/eval_suite.py`: they live with their per-item records in `/Data2/lzp/vllm-eval-p4/`, and only their design and results are in the repository, as `eval/PHASE4_DESIGN.md` and `eval/PHASE4_RESULTS.md`. Reproducing either tier means using those scripts, and the design was frozen before the first comparison run, which is what lets its power calculation be read as a promise rather than a rationalisation.
 
-**Accuracy after long decode residency.** Every tier above is prefill plus one token, or a short retrieval answer. Nothing measures KV written at token 1 of a 3,000-token reasoning trace and read at token 3,000, which is the one place a quantised KV cache could still degrade unobserved.
+**Free-generation reasoning correctness** is now a real instrument. 402 paired items — 252 MMLU-Pro stratified over all fourteen categories, 150 MATH-500 at level 3 or above — greedy, seed-fixed, the same prompts submitted in the same order in every cell, each configuration's answers graded against the gold answer and the two configurations compared by paired McNemar exact. Pairing is what makes it affordable: at the discordance actually observed, 5-7%, it resolves a 3.4 pp regression at 80% power, where two independent rates at the same N would need 8.8 pp. It is the only tier here that both scores against ground truth and exercises free generation, and it needs its own null arm — the same configuration rebooted against itself — because greedy generation at concurrency 32 is chaotic at the ~6% item level no matter what changes.
 
-**Free-generation reasoning correctness.** Never run, in any phase, and not implemented: the 30 reasoning tasks carry no expected answers, and the trace tier replays their output teacher-forced instead of scoring it. At that N even a correctness check would be a smoke test, with roughly 20-30% power against a 10 pp regression, so closing this gap means more tasks and a scorer, not just a run.
+**Accuracy after long decode residency** is measured by a matched short/long arithmetic ledger. The long variant generates around ten thousand tokens per item and then asks the model to read back values it emitted itself earlier in the same generation — content that exists only in decode-written KV. Steps are scored and paired per (item, step), and the hypothesis is the length by configuration interaction, so a penalty of the same size at both lengths is not a residency effect. At 800 long steps a clean run bounds a deep-decode step-error rate at 0.38 pp one-sided; long-range recall, at 80 items, bounds only at 3.8 pp.
+
+Neither tier can show equivalence — a null result bounds a regression at that resolution and no further — and three things remain genuinely unmeasured.
+
+**Agentic multi-round coding**, which is the dominant real workload, has no gradeable reference data on this host. HumanEval is absent, the SWE-bench path a demo config names does not exist, and LiveCodeBench ships its tests in a form that needs an execution sandbox this host does not have. It enters only through the ungraded greedy-divergence probe, which can say that two configurations produce different text and cannot say which text is better.
+
+**Any change smaller than about 3 pp** in free-generation correctness, or about 2.5 pp against a matched attention kernel. The divergence probe is far more sensitive, but it measures difference rather than damage.
+
+**Sustained production traffic.** The longest continuous load ever run on the current FP8 configuration was the roughly 35-minute correctness sweep at concurrency 32. Multi-hour behaviour under real traffic has never been measured on any configuration.
 
 The KV offload tier is also nearly untested: it read zero bytes in every ordinary load run, and only a deliberate overload cell ever consulted it.
 
 ## Reproducing a cell
 
-1. Write the candidate as its own deployment profile and point the active selector at it. Never edit the shipped profile in place. The study harness did exactly that, and its out-of-tree restore target silently went stale until a later phase caught that it still carried a KV pool value already proven to kill the engine; refresh any such restore copy from the shipped profile before booting anything.
+1. Write the candidate as its own deployment profile and boot it by setting `VLLM_DEPLOYMENT`, rather than editing the shipped profile in place. The study harness does edit it in place: it regenerates the shipped profile as the committed baseline plus the cell's diff, and after a failed boot restores it with `git show HEAD:config/deployments/<id>.conf`. That replaced a private restore copy which had silently gone stale — by the end it carried a KV pool value already proven to kill the engine, and a precision the service no longer ran — but the safety comes with a dependency: a restore is only ever as good as `HEAD`. The repository must be a real checkout with its history present, and the profile committed at `HEAD` must be one that boots. So commit a profile change before running a cell, never during one, and never leave the working tree holding the only copy of a good profile.
 2. Restart `vllm.service` alone and wait for readiness. A compile-cache miss adds several minutes on top of the normal load.
 3. Record the boot with `bootfacts` and read it: backend, block size, GPU KV tokens, concurrency at full context, scale warnings, compile time. A cell whose boot facts do not match its intent is not that cell.
 4. Capture the matched control at this compile hash if one does not already exist. This is the step that gets skipped.
@@ -102,6 +110,6 @@ The KV offload tier is also nearly untested: it read zero bytes in every ordinar
 7. Score against the matched control, never against a baseline at a different compile hash.
 8. Restore the shipped profile and confirm health before leaving.
 
-The captures those comparisons are scored against are data and live outside the repository, under `~/vllm-study-results/<cell>/`; the tier-1 and trace references are the `cell0-base-D` capture, and its reasoning traces cannot be regenerated once production has moved off the configuration that produced them. Nothing in this repository backs them up.
+The captures those comparisons are scored against are data and live outside the repository, under `~/vllm-study-results/<cell>/`; the tier-1 and trace references are the `cell0-base-D` capture. Production has since moved off the BF16 configuration that produced its reasoning traces, so those traces can no longer be regenerated, which is why they alone are committed, as `eval/reference/bf16-reference-traces.json`. The tier-1 logprob captures are not backed up anywhere in this repository.
 
 A cell is expensive but bounded. Measured on this hardware: a boot plus one load run takes about 12 minutes, and one cell carrying two load runs and every accuracy tier took 1 hour 48 minutes, of which the needle grid alone was 67. Spend that on questions the boot facts cannot already answer — a flag the engine disables for this architecture produces a byte-identical engine, and measuring a no-op twice is padding, not evidence.
