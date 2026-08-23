@@ -11,8 +11,18 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 DEPLOYMENTS_DIR="$REPO_ROOT/config/deployments"
 SELECTOR="$DEPLOYMENTS_DIR/active"
 
-[[ -r "$SELECTOR" ]] || fail "active deployment selector is not readable: $SELECTOR"
-ACTIVE_DEPLOYMENT=$(<"$SELECTOR")
+# The selector names the default deployment. VLLM_DEPLOYMENT overrides it so a
+# trade-study run, or a future per-instance unit, can resolve a different profile
+# without rewriting the selector -- and so a candidate configuration never has to
+# be written over the production profile. It is deliberately absent from the
+# unset list below: unlike the profile's own names it arrives from the
+# environment by design.
+if [[ -n "${VLLM_DEPLOYMENT:-}" ]]; then
+    ACTIVE_DEPLOYMENT="$VLLM_DEPLOYMENT"
+else
+    [[ -r "$SELECTOR" ]] || fail "active deployment selector is not readable: $SELECTOR"
+    ACTIVE_DEPLOYMENT=$(<"$SELECTOR")
+fi
 [[ "$ACTIVE_DEPLOYMENT" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || \
     fail "active deployment ID is empty or invalid: $ACTIVE_DEPLOYMENT"
 PROFILE="$DEPLOYMENTS_DIR/$ACTIVE_DEPLOYMENT.conf"

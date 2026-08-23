@@ -41,7 +41,9 @@ class _Repo:
             f"{value}\n", encoding="utf-8"
         )
 
-    def write_profile(self, *, omit: str = "") -> None:
+    def write_profile(
+        self, *, deployment: str = "test-deployment", omit: str = "", **overrides: str
+    ) -> None:
         values = {
             "VLLM_PYTHON": str(self.python),
             "VLLM_MODEL_PATH": str(self.root / "model"),
@@ -50,11 +52,12 @@ class _Repo:
             "VLLM_CPU_AFFINITY": "0",
             "VLLM_NUMA_NODES": "0",
         }
+        values.update(overrides)
         values.pop(omit, None)
         lines = [f"{k}={v}" for k, v in values.items()]
         lines.append('VLLM_RUNTIME_ENV=("TEST_MARKER=1")')
         lines.append("VLLM_ARGS=(--host 127.0.0.1 --port 65000)")
-        (self.root / "config" / "deployments" / "test-deployment.conf").write_text(
+        (self.root / "config" / "deployments" / f"{deployment}.conf").write_text(
             "\n".join(lines) + "\n", encoding="utf-8"
         )
 
@@ -101,6 +104,25 @@ class EntryScriptTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn(message, result.stderr)
                 self.assertFalse(repo.argv_log.exists())
+
+    def test_deployment_override_resolves_without_the_selector(self) -> None:
+        """A study run or a per-instance unit selects a profile from the environment."""
+        self.repo.write_profile(
+            deployment="candidate", VLLM_SERVED_MODEL_NAME="candidate-model"
+        )
+        (self.repo.root / "config" / "deployments" / "active").unlink()
+
+        result = self.repo.run("run-vllm", VLLM_DEPLOYMENT="candidate")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        argv = self.repo.argv_log.read_text(encoding="utf-8").split("\n")
+        self.assertEqual(
+            argv[argv.index("--served-model-name") + 1], "candidate-model"
+        )
+
+        # The override is validated exactly like the selector's own value.
+        result = self.repo.run("run-vllm", VLLM_DEPLOYMENT="../escape")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("deployment ID is empty or invalid", result.stderr)
 
     def test_missing_api_key_fails_fast(self) -> None:
         result = self.repo.run("run-vllm", VLLM_API_KEY="")
