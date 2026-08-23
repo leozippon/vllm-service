@@ -105,6 +105,24 @@ class EntryScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("VLLM_CPU_CORES is required in", result.stderr)
 
+    def test_a_gpu_outside_the_host_allowlist_is_refused(self) -> None:
+        """On a shared host the profile must not be the only thing keeping us off
+        another tenant's GPU."""
+        self.repo.write_profile(VLLM_GPUS="3")
+        result = self.repo.run("run-vllm", VLLM_HOST_GPUS="6,7")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("GPU 3 is not in VLLM_HOST_GPUS (6,7)", result.stderr)
+        self.assertFalse(self.repo.argv_log.exists())
+
+        # Membership is by whole index, not by substring.
+        self.repo.write_profile(VLLM_GPUS="1")
+        result = self.repo.run("run-vllm", VLLM_HOST_GPUS="10,11")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("GPU 1 is not in VLLM_HOST_GPUS", result.stderr)
+
+        result = self.repo.run("run-vllm", VLLM_HOST_GPUS="0,1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_one_declared_port_reaches_the_engine_and_the_gateway(self) -> None:
         """The profile declares the engine port; everything else follows from it."""
         result = self.repo.run("run-vllm")

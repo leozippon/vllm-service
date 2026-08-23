@@ -31,6 +31,17 @@ require_array VLLM_ARGS
 [[ -n "${VLLM_API_KEY:-}" ]] || fail "VLLM_API_KEY is required in the environment"
 ((${#VLLM_ARGS[@]} > 0)) || fail "VLLM_ARGS must not be empty in $PROFILE"
 
+# The profile says which GPUs this deployment wants; VLLM_HOST_GPUS says which
+# GPUs this machine has given the service. Most GPUs on a shared host belong to
+# someone else, and a wrong GPU set now also misplaces CPU and memory, so the
+# allowlist is checked before anything acts on it.
+if [[ -n "${VLLM_HOST_GPUS:-}" ]]; then
+    for gpu in ${VLLM_GPUS//,/ }; do
+        [[ ",$VLLM_HOST_GPUS," == *",$gpu,"* ]] || \
+            fail "GPU $gpu is not in VLLM_HOST_GPUS ($VLLM_HOST_GPUS)"
+    done
+fi
+
 # VLLM_GPUS is the authority for device selection; an explicit
 # CUDA_VISIBLE_DEVICES in VLLM_RUNTIME_ENV still overrides it below.
 export CUDA_VISIBLE_DEVICES="$VLLM_GPUS"
