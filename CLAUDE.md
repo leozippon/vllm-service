@@ -1,17 +1,15 @@
 # Repository Guidelines
 
-`README.md` describes what this service is and how it is installed, operated, configured for clients, and validated. Optimize inference throughput and concurrency while preserving the model's native long context, precision, and vendor-equivalent API semantics; those three are constraints on any tuning decision, not quantities to trade against throughput.
+## Design Principle
 
-Configuration states policy and intent. The service runs one deployment at a time, and its trusted profile, together with the ignored local environment file, is the authority for every model- and host-specific value, so shared code, units, and documents stay free of them. A fact the host can report for itself is derived at start rather than written down, so a profile never carries one machine's topology to another. Credentials belong only in that environment file, never in the repository, a log, or a document.
+Optimize inference speed and concurrency while preserving the model's long-context capability and accuracy as far as possible. Treat long context and accuracy as constraints on any tuning decision, not as quantities to trade against throughput.
 
-Compute cannot reach the public model hub directly. Checkpoint downloads go through the mirror and credentials `README.md` documents.
 
-Read the document that owns a subject before changing behavior it describes, and record what you learn where that subject lives:
+## Runtime Environment
 
-- `README.md` — current architecture, installation, operation, client configuration, and validation, including which configuration source owns which value.
-- `MEASUREMENT.md` — how to measure the engine truthfully, and what each instrument can and cannot resolve.
-- `eval/` — the measurement harness and the study documents recording what was measured and decided.
-- `LOGBOOK.md` — the dated, append-oriented record of what was tried, decided, rolled back, and validated.
+The service runs from `/Data/public/.venvs/vllm-runtime-py311`, a Python 3.11 virtual environment on shared storage outside the repository. The active deployment profile names its interpreter as `VLLM_PYTHON`, and `pyrightconfig.json` points type checking at the same environment.
+
+Use that interpreter for the service, the tests, and every validation command, so that what is checked is what runs. Locally tuned kernel configuration files live in its `site-packages` and are not package content: rebuilding or reinstalling the environment discards them, and they must be restored afterwards.
 
 
 # Global Guidelines
