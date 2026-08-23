@@ -24,6 +24,8 @@ The gateway defaults to four in-flight requests, eight additional waiters, and a
 | `systemd/` | Stable unit names, restart policy, generic cgroup limits, repository paths, and service topology |
 | `README.md` | Current installation and operation procedures |
 | `LOGBOOK.md` | Append-oriented history, evidence, decisions, and rollbacks |
+| `MEASUREMENT.md` | Standing rules for measuring the engine truthfully, and the limits of what those measurements can show |
+| `eval/` | The trade-study harness and the study decision documents; evaluation results and corpus stay outside the repository |
 
 Create local configuration from the sanitized template:
 
