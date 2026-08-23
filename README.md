@@ -48,6 +48,13 @@ chmod 600 .env
 
 Fill `VLLM_API_KEY` and any required download credentials. Process environment values take precedence over values read from `.env`. Deployment profiles are sourced as shell code and must be treated as trusted repository configuration.
 
+Compute has no direct route to `huggingface.co`, so a checkpoint is fetched through the mirror named by `HF_ENDPOINT` with the token from the same file. Export the file first, then download to the path the deployment profile will name; weights stay on shared storage outside the repository.
+
+```console
+set -a; source .env; set +a
+hf download organization/model-name --local-dir /path/to/checkpoint --token "$HF_TOKEN"
+```
+
 Two placement facts are deliberately kept out of the profile. The NUMA node and the CPU list are derived from the GPU set at every start, through the host's own topology, and logged as part of the boot record, so a profile never carries one machine's core numbering to another; only the core budget stays explicit, because how much of a shared node a deployment may take is policy rather than topology. Setting both `VLLM_NUMA_NODES` and `VLLM_CPU_AFFINITY` in the profile bypasses the derivation, which is the answer for a host where the first cores of the node are not yours to take. Separately, `VLLM_HOST_GPUS` in `.env` states which GPUs the machine has given this service, and a profile asking for any other GPU fails to start instead of taking a GPU that belongs to another tenant.
 
 Ports follow one convention. The profile declares the engine port, the gateway answers on the next one, and both health probes derive from it, so a deployment needs exactly one port number. Space deployments ten apart so adding one never collides with an existing pair, and check what is already bound before choosing — this host is shared, and other tenants hold scattered ports through the 8000s and 8100s:
