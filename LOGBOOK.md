@@ -77,7 +77,7 @@
 
 - 动机：计算节点没有到 `huggingface.co` 的直连；本地密钥只能有一份来源。
 - 变更：忽略的 `.env`（mode 600）持有 `VLLM_API_KEY`、`HF_TOKEN`、`HF_ENDPOINT`；进程环境变量覆盖文件值；`.env.example` 是非秘密模板，镜像为 `https://hf-mirror.com`。
-- 证据/结果：README 的配置边界一节，以及 `AGENTS.md`/`CLAUDE.md` 的「Network And Downloads」。本日志不记录任何密钥值。
+- 证据/结果：README 的配置边界一节（下载步骤已于 2026-08-23 由指令文件迁入该节）。本日志不记录任何密钥值。
 - 决定/回滚：接受；`.env` 永不提交。
 
 ### 官方 FP8 下载与校验（accepted）

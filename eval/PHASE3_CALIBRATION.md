@@ -115,7 +115,8 @@ no code change.
 
 Producing the values is the hard half, and it is not feasible in this environment:
 - `llmcompressor` / `modelopt` are **not installed** (only `compressed_tensors`, the loader side), and
-  Compute has no route to PyPI or huggingface.co.
+  Compute has no route to huggingface.co. (Corrected 2026-08-23: PyPI *is* reachable, so the
+  packages could in principle be installed; the remaining obstacles below still stand.)
 - A bespoke calibration pass would need the 27.8 B model resident with forward hooks on the 16
   full-attention layers over a representative long-context corpus — i.e. a single-process (TP=1) run that
   does not fit the production service shape, plus GPU time on the two GPUs this service owns.
