@@ -12,3 +12,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Evaluation data: results and corpus are data and stay outside the repository
+eval/results/
+eval/corpus/

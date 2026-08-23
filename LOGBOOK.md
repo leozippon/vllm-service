@@ -193,3 +193,12 @@ Kernel 产物（工作树外，保留）：候选 JSON `/Data2/lzp/vllm-tuning/c
 - 身份/启动证据：package inventory SHA-256 `dafd8afe010be286c2f377e453dc20b053edfc83e22a95669cb918a16b1fe081`；`vllm==0.27.1` commit `g6e448d0ea`，7,098 条 RECORD 结构与既有 supplied hashes 保持验证；五份 mode 0644 tuned L20 JSON 的既有 SHA-256 保持不变并由新路径启动日志全部加载。installed CUDA source 动态导出的必需扩展为 `vllm._C_stable_libtorch`，旧/新路径均成功导入，`vllm._custom_ops` 也成功。
 - 运行/API/测试：backend 约 258 秒恢复 health；TP0/TP1 分别在物理 GPU 6/7；backend health、gateway live/ready、认证 models 为 200，未认证 models 为 401；一次 `reasoning_effort=xhigh` 返回非空 reasoning（681 chars）且答案 `42` 校验通过；repository unittest 4/4 通过。
 - 回滚：bundle 为 `/Data2/lzp/vllm-runtime-py311-rollback-20260822T042507Z/`；失败时先精确记录当前 `vllm.service` mmap，再在 attached shell 执行该目录的 `rollback.sh EXACT_FAILED_SERVICE_MMAP`，其归档会恢复旧目录、venv metadata/bin/RECORD 与全部 maintained files，并等待旧 stack healthy。
+
+## 2026-08-22
+
+### 评测工具入库（accepted，修订「不内嵌」决定）
+
+- 动机：`eval_suite.py` 是 LOGBOOK 全部调优决定与 Phase 1–3 研究的唯一可复现基础，却没有版本控制，所在文件系统已用到 86%，丢失即失去在产配置的审计链。
+- 变更：把 `/Data2/lzp/vllm-eval/eval_suite.py` 逐字节导入 `eval/eval_suite.py`，不重构、不做模型无关化（模型无关化留到待定研究结束之后，以免改动 corpus 或 prompt 使既有 reference 失效）。把只存在于 home 目录的研究决定文档一并导入 `eval/`，按仓库命名约定改为 UPPER_SNAKE_CASE：`PHASE1_RESULTS.md`、`PHASE2_RESULTS.md`、`PHASE3_CALIBRATION.md`、`PHASE3_RESULTS.md`、`FINAL_CONFIG.md`。`.gitignore` 增加 `eval/results/` 与 `eval/corpus/`。未改 `scripts/`、`systemd/`、`config/`、`gateway.py`、`tests/`、`.env.example`，未重启任何服务。
+- 证据/结果：六个文件 `cmp` 全部与来源逐字节一致，`eval_suite.py` SHA-256 `5d79086cbc32f75040c6075e502416d404680047d4708ea4b46cabe913cce139`；用部署 profile 的 Python 3.11.15 `py_compile` 通过，仓库副本 `self-check` 离线自检通过；`unittest discover` 36 项通过。
+- 决定/回滚：修订 2026-08-21「接受为工作树外评测工具；本仓库不内嵌评测生成物」——生成物（results、corpus）仍留在树外并按路径引用，工具本身是代码，入库。`/Data2/lzp/vllm-eval/` 的工作副本不动，仍是研究实际运行位置，导入时与仓库副本字节一致；何时改用仓库副本另行决定。原始 study 目录下的逐 cell 工作笔记与两份 incident 记录未入库，其结论已在上述 phase 文档中。
