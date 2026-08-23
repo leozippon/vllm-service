@@ -44,8 +44,10 @@ class Repo:
         )
 
     def write_profile(
-        self, *, deployment: str = DEPLOYMENT, omit: str = "", **overrides: str
+        self, *, deployment: str = DEPLOYMENT, **overrides: str | None
     ) -> None:
+        """Write a profile; an override of None leaves the name out entirely."""
+
         values = {
             "VLLM_PYTHON": str(self.python),
             "VLLM_MODEL_PATH": str(self.root / "model"),
@@ -56,9 +58,8 @@ class Repo:
             "VLLM_NUMA_NODES": "0",
         }
         values.update(overrides)
-        values.pop(omit, None)
-        lines = [f"{k}={v}" for k, v in values.items()]
-        lines.append('VLLM_RUNTIME_ENV=("TEST_MARKER=1")')
+        lines = [f"{k}={v}" for k, v in values.items() if v is not None]
+        lines.append('VLLM_RUNTIME_ENV=("CUDA_DEVICE_ORDER=PCI_BUS_ID")')
         lines.append("VLLM_ARGS=(--host 127.0.0.1)")
         (self.root / "config" / "deployments" / f"{deployment}.conf").write_text(
             "\n".join(lines) + "\n", encoding="utf-8"
@@ -93,3 +94,26 @@ class Repo:
             for line in self.env_log.read_text(encoding="utf-8").splitlines()
         )
         return {name: value for name, _, value in pairs}
+
+
+def write_topology(root: Path, gpu_nodes: list[int], cpulists: dict[int, str]) -> Path:
+    """A synthetic sysfs: NVIDIA devices in PCI bus order, and their NUMA nodes.
+
+    ``gpu_nodes[i]`` is the NUMA node of the GPU that CUDA would number ``i``.
+    """
+
+    sysfs = root / "sysfs"
+    shutil.rmtree(sysfs, ignore_errors=True)
+    drivers = sysfs / "bus" / "pci" / "drivers" / "nvidia"
+    drivers.mkdir(parents=True)
+    # The driver directory also holds bind/unbind/module; only devices count.
+    (drivers / "bind").touch()
+    for index, node in enumerate(gpu_nodes):
+        device = drivers / f"0000:{index:02x}:00.0"
+        device.mkdir()
+        (device / "numa_node").write_text(f"{node}\n", encoding="utf-8")
+    for node, cpulist in cpulists.items():
+        directory = sysfs / "devices" / "system" / "node" / f"node{node}"
+        directory.mkdir(parents=True)
+        (directory / "cpulist").write_text(f"{cpulist}\n", encoding="utf-8")
+    return sysfs

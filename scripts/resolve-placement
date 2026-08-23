@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Derive CPU and NUMA placement for a GPU set from this host's own topology.
+#
+#   usage: resolve-placement <gpu-list> <cpu-cores>   ->  "<numa-node> <cpu-list>"
+#
+# A deployment profile written on one machine must not carry another machine's
+# core numbering, because the wrong binding fails silently: a wrong node costs
+# cross-socket memory bandwidth for the life of the deployment and nothing
+# reports it. VLLM_GPUS is the one placement fact the operator states, and both
+# the NUMA node and the CPU pool follow from it through sysfs.
+#
+# The core count stays explicit. It is a policy fact -- how much of that node
+# this deployment may take on a shared host -- not a topology fact, and deriving
+# it would be guessing. "The first N CPUs of the node" is itself a policy guess;
+# it is right on this host, and setting VLLM_NUMA_NODES and VLLM_CPU_AFFINITY in
+# the profile bypasses the derivation entirely for where it is not.
+#
+# Where the topology cannot be trusted this fails rather than guessing.
+# VLLM_SYSFS_ROOT overrides the sysfs root; it exists so the tests can present a
+# synthetic topology instead of this machine's.
+
+set -eu
+
+SYSFS="${VLLM_SYSFS_ROOT:-/sys}"
+
+fail() {
+    printf 'resolve-placement: %s\n' "$*" >&2
+    exit 1
+}
+
+(($# == 2)) || fail "usage: resolve-placement <gpu-list> <cpu-cores>"
+gpus=$1
+cores=$2
+[[ "$cores" =~ ^[1-9][0-9]*$ ]] || \
+    fail "CPU core count must be a positive integer, got: $cores"
+
+# CUDA numbers devices by PCI bus id only under CUDA_DEVICE_ORDER=PCI_BUS_ID.
+# Without it the indices in the GPU list need not name the devices found here.
+[[ "${CUDA_DEVICE_ORDER:-}" == PCI_BUS_ID ]] || \
+    fail "CUDA_DEVICE_ORDER must be PCI_BUS_ID before placement can be derived from a GPU index"
+
+# The devices bound to the nvidia driver, in PCI bus order -- exactly the order
+# CUDA_DEVICE_ORDER=PCI_BUS_ID gives, so a device's position here is the index
+# the GPU list uses.
+shopt -s nullglob
+devices=("$SYSFS"/bus/pci/drivers/nvidia/*:*:*.*)
+shopt -u nullglob
+((${#devices[@]} > 0)) || \
+    fail "no NVIDIA device is bound under $SYSFS/bus/pci/drivers/nvidia"
+
+node=""
+for gpu in ${gpus//,/ }; do
+    [[ "$gpu" =~ ^(0|[1-9][0-9]*)$ ]] || fail "GPU index must be a number, got: $gpu"
+    ((gpu < ${#devices[@]})) || \
+        fail "no such GPU: $gpu (${#devices[@]} NVIDIA devices present)"
+    read -r gpu_node < "${devices[gpu]}/numa_node" || \
+        fail "GPU $gpu has no numa_node in sysfs: ${devices[gpu]}"
+    ((gpu_node >= 0)) || fail \
+        "GPU $gpu reports no NUMA affinity; set VLLM_NUMA_NODES and VLLM_CPU_AFFINITY explicitly"
+    if [[ -z "$node" ]]; then
+        node=$gpu_node
+    elif [[ "$gpu_node" != "$node" ]]; then
+        fail "GPUs $gpus span NUMA nodes $node and $gpu_node; set VLLM_NUMA_NODES and VLLM_CPU_AFFINITY explicitly"
+    fi
+done
+
+cpulist_file="$SYSFS/devices/system/node/node$node/cpulist"
+read -r cpulist < "$cpulist_file" || fail "cannot read $cpulist_file"
+
+cpus=()
+for range in ${cpulist//,/ }; do
+    for ((cpu = ${range%%-*}; cpu <= ${range##*-}; cpu++)); do
+        cpus+=("$cpu")
+        ((${#cpus[@]} < cores)) || break 2
+    done
+done
+((${#cpus[@]} == cores)) || fail \
+    "NUMA node $node has ${#cpus[@]} CPUs, fewer than the $cores requested"
+
+# Re-compact consecutive CPUs, so a derived binding is the same string a
+# hand-written one would have been.
+ranges=()
+start=${cpus[0]}
+prev=$start
+for cpu in "${cpus[@]:1}" ""; do
+    if [[ -n "$cpu" ]] && ((cpu == prev + 1)); then
+        prev=$cpu
+        continue
+    fi
+    if ((start == prev)); then
+        ranges+=("$start")
+    else
+        ranges+=("$start-$prev")
+    fi
+    start=$cpu
+    prev=$cpu
+done
+
+printf '%s %s\n' "$node" "$(IFS=,; printf '%s' "${ranges[*]}")"

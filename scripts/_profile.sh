@@ -32,7 +32,7 @@ PROFILE="$DEPLOYMENTS_DIR/$ACTIVE_DEPLOYMENT.conf"
 # inherited value from silently satisfying a required-value check. VLLM_API_KEY
 # is deliberately absent: it legitimately arrives from .env through systemd.
 unset VLLM_PYTHON VLLM_MODEL_PATH VLLM_SERVED_MODEL_NAME VLLM_PORT \
-      VLLM_GPUS VLLM_CPU_AFFINITY VLLM_NUMA_NODES \
+      VLLM_GPUS VLLM_CPU_CORES VLLM_CPU_AFFINITY VLLM_NUMA_NODES \
       VLLM_RUNTIME_ENV VLLM_ARGS
 
 # Deployment profiles are trusted shell configuration maintained with this repository.

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _repo import PORT, Repo
+from _repo import PORT, Repo, write_topology
 
 
 class EntryScriptTests(unittest.TestCase):
@@ -70,14 +70,14 @@ class EntryScriptTests(unittest.TestCase):
 
     def test_inherited_environment_does_not_satisfy_a_profile_requirement(self) -> None:
         """B11: the profile is the authority; an inherited value must not stand in."""
-        self.repo.write_profile(omit="VLLM_SERVED_MODEL_NAME")
+        self.repo.write_profile(VLLM_SERVED_MODEL_NAME=None)
         result = self.repo.run("run-vllm", VLLM_SERVED_MODEL_NAME="inherited")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("VLLM_SERVED_MODEL_NAME is required in", result.stderr)
         self.assertFalse(self.repo.argv_log.exists())
 
     def test_gateway_shares_the_same_preamble(self) -> None:
-        self.repo.write_profile(omit="VLLM_PYTHON")
+        self.repo.write_profile(VLLM_PYTHON=None)
         result = self.repo.run("run-gateway", VLLM_PYTHON="/bin/sh")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("VLLM_PYTHON is required in", result.stderr)
@@ -88,6 +88,22 @@ class EntryScriptTests(unittest.TestCase):
         self.assertEqual(
             self.repo.argv()[:3], ["-m", "uvicorn", "gateway:app"]
         )
+
+    def test_placement_is_derived_when_the_profile_does_not_state_it(self) -> None:
+        """A profile must not carry another machine's core numbering."""
+        sysfs = write_topology(self.repo.root, [0], {0: "0-3"})
+        self.repo.write_profile(
+            VLLM_CPU_AFFINITY=None, VLLM_NUMA_NODES=None, VLLM_CPU_CORES="2"
+        )
+        result = self.repo.run("run-vllm", VLLM_SYSFS_ROOT=str(sysfs))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("placement node=0 cpus=0-1 (gpus 0)", result.stdout)
+
+        # The count is policy, not topology, so it is never guessed.
+        self.repo.write_profile(VLLM_CPU_AFFINITY=None, VLLM_NUMA_NODES=None)
+        result = self.repo.run("run-vllm", VLLM_SYSFS_ROOT=str(sysfs))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("VLLM_CPU_CORES is required in", result.stderr)
 
     def test_one_declared_port_reaches_the_engine_and_the_gateway(self) -> None:
         """The profile declares the engine port; everything else follows from it."""
@@ -117,10 +133,7 @@ class EntryScriptTests(unittest.TestCase):
         """A four-minute load must not end in a gate polling a port nobody bound."""
         for value in ("", "8010x", "65535"):
             with self.subTest(port=value):
-                if value:
-                    self.repo.write_profile(VLLM_PORT=value)
-                else:
-                    self.repo.write_profile(omit="VLLM_PORT")
+                self.repo.write_profile(VLLM_PORT=value or None)
                 for script in ("run-vllm", "run-gateway"):
                     result = self.repo.run(script)
                     self.assertEqual(
