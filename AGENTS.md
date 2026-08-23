@@ -7,7 +7,7 @@ Optimize inference speed and concurrency while preserving the model's long-conte
 
 ## Runtime Environment
 
-The service runs from `/Data/public/.venvs/vllm-runtime-py311`, a Python 3.11 virtual environment on shared storage outside the repository. The active deployment profile names its interpreter as `VLLM_PYTHON`, and `pyrightconfig.json` points type checking at the same environment.
+The service runs from `.venv` in this repository, a Python 3.11 virtual environment that git ignores and no checkout reproduces. The active deployment profile names its interpreter as `VLLM_PYTHON`, and `pyrightconfig.json` points type checking at the same environment.
 
 Use that interpreter for the service, the tests, and every validation command, so that what is checked is what runs. Locally tuned kernel configuration files live in its `site-packages` and are not package content: rebuilding or reinstalling the environment discards them, and they must be restored afterwards.
 

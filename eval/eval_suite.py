@@ -1319,7 +1319,7 @@ NEEDLE_DEFAULT_SLOTS = 5
 CORPUS_PATH = Path("/Data2/lzp/vllm-eval/corpus/corpus-v1.txt")
 CORPUS_IDS_PATH = Path("/Data2/lzp/vllm-eval/corpus/corpus-v1.ids.json")
 CORPUS_SOURCE_ROOT = Path(
-    "/Data/public/.venvs/vllm-runtime-py311/lib/python3.11/site-packages/vllm"
+    "/Data/lzp/vllm-service/.venv/lib/python3.11/site-packages/vllm"
 )
 CORPUS_MIN_CHARS = 4_800_000
 

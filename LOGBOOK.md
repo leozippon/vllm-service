@@ -25,8 +25,9 @@
 | `~/vllm-study-results/` | Phase 1–3 的逐 cell capture 与两份 incident 记录 |
 | `~/vllm-study-results/p4/` | Phase 4 的逐 cell 启动日志、分析 dump 与时间线（设计与结果已入库 `eval/`）；逐题原始记录与其工具在 `/Data2/lzp/vllm-eval-p4/` |
 | `/Data2/lzp/vllm-tuning/` | L20 kernel 调优候选、runs、logs；安装清单 `install-backup/20260821-084146/` |
-| `/Data2/lzp/vllm-runtime-py311-rollback-20260822T042507Z/` | venv 改名的回滚 bundle |
+| `/Data2/lzp/vllm-runtime-py311-rollback-20260822T042507Z/` | venv 改名的回滚 bundle；其还原目标 `/Data/public/.venvs/vllm-runtime-py311` 已于 2026-08-23 迁入仓库 `.venv`，该 bundle 此后只作历史记录，不可直接执行 |
 | `~/rollback/engine-phase4-20260823T034829Z/` | 切换 FP8 KV 之前的 profile 副本 |
+| `~/rollback/venv-move-20260823T173204Z/` | venv 迁入仓库 `.venv` 的迁移前记录与回滚脚本 |
 
 `/Data2/lzp/vllm-eval/results/` 下 2026-08-21 的逐次 capture：
 
@@ -364,3 +365,14 @@
 - 变更（`MEASUREMENT.md`）：「What no phase measured」重写，写清两个 tier 现在是什么、能分辨到什么程度（正确性在实测 5–7% 不一致率下 80% power 可检出 3.4 pp；长驻留 800 步全对把深 decode 步骤错误率单侧压到 0.38 pp），以及仍然没测的三件事（agentic 多轮编码本机无可评分数据、小于约 3 pp 的变化、持续数小时的生产流量），并如实写明这两个 tier 的工具**不在** `eval/eval_suite.py` 里，而在 `/Data2/lzp/vllm-eval-p4/`。「Reproducing a cell」第 1 步改写为现状：harness 用 `git show HEAD:` 恢复已提交的 profile，因此新增了对 git 历史与一个能启动的 `HEAD` profile 的依赖。另修两处已失效的陈述：gateway 的准入上限不是 4/8 而是默认 32/32，以及推理轨迹参考已作为 fixture 入库，不再「仓库里没有任何备份」。
 - 证据/结果：数字逐条核对——在跑的引擎自报 `fp8_e4m3`、FlashInfer、GPU KV 1,358,930 tokens、262,144 满长 5.18×；`gateway.py` 的默认值为 32/32；`/Data2/lzp/vllm-eval/known-good.conf` 已不存在，`restore_profile.sh` 从 `HEAD` 读取；`eval/eval_suite.py` 与研究运行位置仍逐字节一致。README 的验证块逐字运行通过，49 项测试 OK；被改文档的引用全部落在真实存在的文件上。未改 `README.md`、`scripts/`、`systemd/`、`config/`、`gateway.py`、`tests/`，未重启任何服务。
 - 未做/仍开放：Phase 4 的逐题原始记录与打分脚本仍在树外（体量与「评测生成物不入库」的既有决定），`MEASUREMENT.md` 已点明这一依赖；`CLAUDE.md`/`AGENTS.md` 的那一项由用户单独处理。
+
+### venv 迁入仓库 `.venv`（accepted）
+
+- 动机：解释器与库此前在 `/Data/public/.venvs/vllm-runtime-py311`。其父目录 `/Data/public` 在这台 47 租户主机上是 `root:root` 0777 且没有 sticky bit，任何用户都可以改名或替换 `.venvs` 这个目录项，从而替换本服务实际执行的解释器。这不是整洁问题而是可篡改面。新位置 `/Data/lzp/vllm-service/.venv` 的父链是 `/Data/lzp` 0700 与仓库 0775，都属 lzp。
+- 变更（迁移本身）：同文件系统（`/dev/sdc`）原子改名，耗时 4 ms，7.8 GiB 未发生任何复制。改名之前先把 `.venv/` 写进 `.gitignore`，使它在任何时刻都不可能被 stage。venv 内部按迁移前扫描出的 60 个文本文件逐一重写绝对路径：`pyvenv.cfg` 的 `command`、`bin/` 下 56 个 shebang、3 个 activation script；另按新内容重算 42 份 dist-info 中的 56 条 `RECORD` 哈希与大小；删除 1,244 个 `__pycache__` 下共 8,394 个 `.pyc`（全部内嵌旧路径），交由首次导入重建。
+- 变更（引用）：deployment profile 的 `VLLM_PYTHON` 与 runtime `PATH`；`pyrightconfig.json` 改为约定式相对布局 `venvPath: "."` / `venv: ".venv"`，顺带去掉一处硬编码的主机绝对路径；`eval/eval_suite.py` 的 `CORPUS_SOURCE_ROOT`，并以 `cmp` 确认与 `/Data2/lzp/vllm-eval/eval_suite.py` 仍逐字节一致；树外 harness 的 8 个脚本；`CLAUDE.md` 与 `AGENTS.md` 的 Runtime Environment 段（两份仍只差自称文件名那一行）；`README.md` 架构段补一句，说明该解释器在仓库内、git 忽略、且 checkout 不可复现。`eval/PHASE3_CALIBRATION.md` 与既有 capture 里的旧路径是带日期的历史记录，不改写；上一条 venv 改名的 bundle 在证据表里标注为不可直接执行。
+- 不变项：model、checkpoint、served name、端口、GPU 6–7、TP2、`fp8_e4m3` KV、262144 context、batch 8192、prefix caching、32 GiB offload、reasoning-effort alias、gateway、systemd unit、selector 与 `.env` 都没有改变；Python 3.11.15 / vLLM 0.27.1 / torch 2.13.0+cu130 与迁移前相同。
+- 证据（身份）：五份 tuned L20 block-FP8 JSON 的 SHA-256 与迁移前记录逐条相同，且新路径的启动日志在 TP0 与 TP1 上各自加载了全部五份；`vllm._C_stable_libtorch` 与 `vllm._custom_ops` 导入成功；`hf`、`pip`、`vllm`、`uvicorn` 四个 console script 与 activation script 均可执行；venv 内已无任何文本文件指向旧路径；`bin/` 条目的 RECORD 失配从迁移前既有的 57 条降到 2 条，剩下两条是早于本次的 `bin/__pycache__` 缺失项。
+- 证据（运行）：引擎 4 分 30 秒恢复 health，略长于常态，与清空 bytecode 后的重编译相符；两个 unit `active` 且 `NRestarts=0`。容量与迁移前逐位相同：GPU KV 1,358,930 tokens、262,144 满长 5.18×、`fp8_e4m3`、FlashInfer。backend `/health`、gateway `/health/live`、`/health/ready`、`/health` 与认证 models 均 200，未认证的 models 与 chat completions 均 401；经 gateway 的一次 `reasoning_effort=high` 返回 259 字符 reasoning 且答案正确，同一取值直连引擎返回 400，说明 alias 仍在生效。README 的验证块逐字运行通过，49 项测试 OK；`git status` 只含本次的 8 个文件，`.venv` 下任何路径都无法被 track，`.git` 仍为 1.8 MiB。
+- 附带发现：Coder 镜像的同步层按名字排除 `.venv/`，但并不遵循 `.gitignore`——实测同样被 git 忽略的 `.venv-synctest/` 被同步，而 `.venv/` 没有。因此 `.venv` 这个名字本身是必要条件，换成任何其它名字都会把 7.8 GiB 拖进镜像同步。
+- 决定/回滚：接受。`/Data/public/.venvs` 清空后已删除。回滚 bundle 为 `~/rollback/venv-move-20260823T173204Z/`，其 `rollback.sh` 执行反向原子改名、还原 venv 内路径、revert 本次 commit 并重启服务。

@@ -16,3 +16,7 @@ __pycache__/
 # Evaluation data: results and corpus are data and stay outside the repository
 eval/results/
 eval/corpus/
+
+# Python runtime environment: the service executes from here.
+# 7.8 GB, holds locally tuned kernel files, never enters git.
+.venv/

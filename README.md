@@ -8,7 +8,7 @@ This repository runs one replaceable vLLM deployment behind an authenticated Ope
 local client -> gateway (127.0.0.1:8011) -> vLLM engine (127.0.0.1:8010)
 ```
 
-`vllm.service` starts the deployment named by `config/deployments/active`, and `vllm-gateway.service` runs the gateway with the Python executable from that deployment's trusted profile. The profile declares the port the engine binds; the gateway answers on the next port and proxies to it, so the pair moves together and is stated in one place.
+`vllm.service` starts the deployment named by `config/deployments/active`, and `vllm-gateway.service` runs the gateway with the Python executable from that deployment's trusted profile. The profile declares the port the engine binds; the gateway answers on the next port and proxies to it, so the pair moves together and is stated in one place. That interpreter is `.venv` inside this repository; git ignores it and no checkout reproduces it, because it carries locally tuned kernel files that are not package content.
 
 Everything under `/v1` is forwarded byte for byte, with two deliberate exceptions. The client's `Authorization` header is replaced with the gateway's own upstream credential — both are the same key, and the substitution is what stops a client's header from reaching the engine. And one `reasoning_effort` value is renamed when the active deployment configures an alias, so a model whose chat template spells its top reasoning tier differently still serves an unmodified OpenAI client. A successful stream holds its concurrency slot until the stream ends, the client disconnects, or it fails.
 
