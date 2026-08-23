@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-WATCHDOG = Path(__file__).resolve().parent.parent / "scripts" / "health-watchdog"
+from _repo import PORT, Repo
 
 BACKEND_URL = "http://backend.invalid/health"
 GATEWAY_URL = "http://gateway.invalid/health/live"
@@ -39,7 +39,8 @@ class WatchdogTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.tmp = Path(self._tmp.name)
+        self.repo = Repo(Path(self._tmp.name))
+        self.tmp = self.repo.root
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
         for name, body in (("curl", CURL), ("systemctl", SYSTEMCTL)):
@@ -66,9 +67,7 @@ class WatchdogTests(unittest.TestCase):
     def run_watchdog(self, **overrides: str) -> subprocess.CompletedProcess:
         env = dict(self.env)
         env.update(overrides)
-        return subprocess.run(
-            [WATCHDOG], env=env, check=False, capture_output=True, text=True
-        )
+        return self.repo.run("health-watchdog", **env)
 
     def counter(self, name: str) -> str:
         return (self.state_dir / f"{name}.fails").read_text(encoding="utf-8").strip()
@@ -119,6 +118,28 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(self.counter("backend"), "1")
         self.assertFalse(self.systemctl_log.exists(), result.stdout)
+
+    def test_probe_urls_default_to_the_deployment_port_pair(self) -> None:
+        """The engine on the declared port, the gateway on the next one."""
+        env = {k: v for k, v in self.env.items() if not k.endswith("_URL")}
+        env["FAIL_URL"] = ""
+        result = self.repo.run("health-watchdog", **env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            self.curl_log.read_text(encoding="utf-8").split(),
+            [
+                f"http://127.0.0.1:{PORT}/health",
+                f"http://127.0.0.1:{PORT + 1}/health/live",
+            ],
+        )
+
+    def test_unreadable_profile_is_an_unhealthy_cycle(self) -> None:
+        """Nothing can say where the deployment should answer, so nothing is healthy."""
+        (self.repo.root / "config" / "deployments" / "active").unlink()
+        result = self.run_watchdog(FAIL_URL="")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("selector is not readable", result.stderr)
+        self.assertFalse(self.curl_log.exists())
 
     def test_invalid_threshold_exits_two(self) -> None:
         result = self.run_watchdog(VLLM_WATCHDOG_BACKEND_THRESHOLD="0")

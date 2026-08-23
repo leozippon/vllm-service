@@ -1,90 +1,19 @@
-"""Negative paths and configuration authority in the deployment entry scripts.
-
-These scripts decide whether the GPU box starts at all, so the tests run them as
-real processes against a throwaway repository tree. The engine itself is never
-launched: the profile's VLLM_PYTHON is a recorder that writes its argv and exits.
-"""
+"""Negative paths and configuration authority in the deployment entry scripts."""
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
-RECORDER = """#!/usr/bin/env bash
-printf '%s\\n' "$@" >"$ARGV_LOG"
-"""
-
-
-class _Repo:
-    """A throwaway copy of scripts/ with a synthetic deployment profile."""
-
-    def __init__(self, root: Path) -> None:
-        self.root = root
-        shutil.copytree(REPO_ROOT / "scripts", root / "scripts")
-        (root / "config" / "deployments").mkdir(parents=True)
-        (root / "model").mkdir()
-        self.argv_log = root / "argv.log"
-        self.python = root / "recorder"
-        self.python.write_text(RECORDER, encoding="utf-8")
-        self.python.chmod(0o755)
-        self.write_selector("test-deployment")
-        self.write_profile()
-
-    def write_selector(self, value: str) -> None:
-        (self.root / "config" / "deployments" / "active").write_text(
-            f"{value}\n", encoding="utf-8"
-        )
-
-    def write_profile(
-        self, *, deployment: str = "test-deployment", omit: str = "", **overrides: str
-    ) -> None:
-        values = {
-            "VLLM_PYTHON": str(self.python),
-            "VLLM_MODEL_PATH": str(self.root / "model"),
-            "VLLM_SERVED_MODEL_NAME": "test-model",
-            "VLLM_GPUS": "0",
-            "VLLM_CPU_AFFINITY": "0",
-            "VLLM_NUMA_NODES": "0",
-        }
-        values.update(overrides)
-        values.pop(omit, None)
-        lines = [f"{k}={v}" for k, v in values.items()]
-        lines.append('VLLM_RUNTIME_ENV=("TEST_MARKER=1")')
-        lines.append("VLLM_ARGS=(--host 127.0.0.1 --port 65000)")
-        (self.root / "config" / "deployments" / f"{deployment}.conf").write_text(
-            "\n".join(lines) + "\n", encoding="utf-8"
-        )
-
-    def run(self, script: str, **extra_env: str) -> subprocess.CompletedProcess:
-        env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": str(self.root),
-            "VLLM_API_KEY": "test-key",
-            "ARGV_LOG": str(self.argv_log),
-            # Never let a test sweep the real /dev/shm.
-            "VLLM_OFFLOAD_DIR": str(self.root),
-        }
-        env.update(extra_env)
-        return subprocess.run(
-            [self.root / "scripts" / script],
-            env=env,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+from _repo import PORT, Repo
 
 
 class EntryScriptTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.repo = _Repo(Path(self._tmp.name))
+        self.repo = Repo(Path(self._tmp.name))
 
     def test_unusable_deployment_selection_fails_fast(self) -> None:
         cases = {
@@ -98,7 +27,7 @@ class EntryScriptTests(unittest.TestCase):
         }
         for message, mutate in cases.items():
             with self.subTest(message=message), tempfile.TemporaryDirectory() as raw:
-                repo = _Repo(Path(raw))
+                repo = Repo(Path(raw))
                 mutate(repo)
                 result = repo.run("run-vllm")
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -114,7 +43,7 @@ class EntryScriptTests(unittest.TestCase):
 
         result = self.repo.run("run-vllm", VLLM_DEPLOYMENT="candidate")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        argv = self.repo.argv_log.read_text(encoding="utf-8").split("\n")
+        argv = self.repo.argv()
         self.assertEqual(
             argv[argv.index("--served-model-name") + 1], "candidate-model"
         )
@@ -134,7 +63,7 @@ class EntryScriptTests(unittest.TestCase):
         """/proc/<pid>/cmdline is world-readable on this shared host."""
         result = self.repo.run("run-vllm")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        argv = self.repo.argv_log.read_text(encoding="utf-8").split("\n")
+        argv = self.repo.argv()
         self.assertEqual(argv[argv.index("--served-model-name") + 1], "test-model")
         for token in argv:
             self.assertNotIn("test-key", token, argv)
@@ -157,9 +86,48 @@ class EntryScriptTests(unittest.TestCase):
         result = self.repo.run("run-gateway")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
-            self.repo.argv_log.read_text(encoding="utf-8").split("\n")[:4],
-            ["-m", "uvicorn", "gateway:app", "--host"],
+            self.repo.argv()[:3], ["-m", "uvicorn", "gateway:app"]
         )
+
+    def test_one_declared_port_reaches_the_engine_and_the_gateway(self) -> None:
+        """The profile declares the engine port; everything else follows from it."""
+        result = self.repo.run("run-vllm")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        argv = self.repo.argv()
+        self.assertEqual(argv[argv.index("--port") + 1], str(PORT))
+
+        result = self.repo.run("run-gateway")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        argv = self.repo.argv()
+        self.assertEqual(argv[argv.index("--port") + 1], str(PORT + 1))
+        self.assertEqual(
+            self.repo.recorded_env()["VLLM_GATEWAY_UPSTREAM_URL"],
+            f"http://127.0.0.1:{PORT}",
+        )
+
+        # .env still redirects the upstream, which is what a remote engine needs.
+        redirected = "http://elsewhere.invalid:9000"
+        result = self.repo.run("run-gateway", VLLM_GATEWAY_UPSTREAM_URL=redirected)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            self.repo.recorded_env()["VLLM_GATEWAY_UPSTREAM_URL"], redirected
+        )
+
+    def test_unusable_port_fails_before_the_engine_loads(self) -> None:
+        """A four-minute load must not end in a gate polling a port nobody bound."""
+        for value in ("", "8010x", "65535"):
+            with self.subTest(port=value):
+                if value:
+                    self.repo.write_profile(VLLM_PORT=value)
+                else:
+                    self.repo.write_profile(omit="VLLM_PORT")
+                for script in ("run-vllm", "run-gateway"):
+                    result = self.repo.run(script)
+                    self.assertEqual(
+                        result.returncode, 1, result.stdout + result.stderr
+                    )
+                    self.assertIn("VLLM_PORT must be a TCP port", result.stderr)
+                self.assertFalse(self.repo.argv_log.exists())
 
 
 if __name__ == "__main__":

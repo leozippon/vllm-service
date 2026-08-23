@@ -65,4 +65,5 @@ exec /usr/bin/numactl \
     "$VLLM_PYTHON" -m vllm.entrypoints.openai.api_server \
     --model "$VLLM_MODEL_PATH" \
     --served-model-name "$VLLM_SERVED_MODEL_NAME" \
+    --port "$VLLM_PORT" \
     "${VLLM_ARGS[@]}"

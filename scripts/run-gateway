@@ -8,5 +8,11 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/_profile.sh"
 [[ -n "${VLLM_PYTHON:-}" ]] || fail "VLLM_PYTHON is required in $PROFILE"
 [[ -x "$VLLM_PYTHON" ]] || fail "VLLM_PYTHON is not executable: $VLLM_PYTHON"
 
+# One deployment owns a contiguous port pair: the engine port is declared in the
+# profile and the gateway answers on the next one. .env may still redirect the
+# upstream the gateway proxies to, which is what a remote engine would need.
+export VLLM_GATEWAY_UPSTREAM_URL="${VLLM_GATEWAY_UPSTREAM_URL:-http://127.0.0.1:$VLLM_PORT}"
+
 cd -- "$REPO_ROOT"
-exec "$VLLM_PYTHON" -m uvicorn gateway:app --host 127.0.0.1 --port 8011
+exec "$VLLM_PYTHON" -m uvicorn gateway:app \
+    --host 127.0.0.1 --port "$((VLLM_PORT + 1))"

@@ -8,9 +8,16 @@
 
 set -u
 
+# The probes follow the active deployment's port pair rather than a literal, so
+# they cannot outlive a port change. An unreadable profile exits non-zero, which
+# for a watchdog means "unhealthy this cycle" -- the honest answer when nothing
+# can say where the deployment should be answering.
+# shellcheck source=/dev/null
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/_profile.sh"
+
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/vllm-watchdog"
-UPSTREAM_URL="${VLLM_WATCHDOG_UPSTREAM_URL:-http://127.0.0.1:8010/health}"
-GATEWAY_URL="${VLLM_WATCHDOG_GATEWAY_URL:-http://127.0.0.1:8011/health/live}"
+UPSTREAM_URL="${VLLM_WATCHDOG_UPSTREAM_URL:-http://127.0.0.1:$VLLM_PORT/health}"
+GATEWAY_URL="${VLLM_WATCHDOG_GATEWAY_URL:-http://127.0.0.1:$((VLLM_PORT + 1))/health/live}"
 BACKEND_UNIT="${VLLM_WATCHDOG_BACKEND_UNIT:-vllm.service}"
 GATEWAY_UNIT="${VLLM_WATCHDOG_GATEWAY_UNIT:-vllm-gateway.service}"
 # vllm.service now reports activating for the whole model load, so the backend

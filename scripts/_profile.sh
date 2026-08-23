@@ -31,10 +31,17 @@ PROFILE="$DEPLOYMENTS_DIR/$ACTIVE_DEPLOYMENT.conf"
 # The profile is the authority for these names. Clearing them first keeps an
 # inherited value from silently satisfying a required-value check. VLLM_API_KEY
 # is deliberately absent: it legitimately arrives from .env through systemd.
-unset VLLM_PYTHON VLLM_MODEL_PATH VLLM_SERVED_MODEL_NAME \
+unset VLLM_PYTHON VLLM_MODEL_PATH VLLM_SERVED_MODEL_NAME VLLM_PORT \
       VLLM_GPUS VLLM_CPU_AFFINITY VLLM_NUMA_NODES \
       VLLM_RUNTIME_ENV VLLM_ARGS
 
 # Deployment profiles are trusted shell configuration maintained with this repository.
 # shellcheck source=/dev/null
 source "$PROFILE"
+
+# Every entry script needs the port, so it is validated once here rather than in
+# four places: the engine binds it, the gateway proxies to it and answers on the
+# next one, and both health probes default from it. The upper bound is 65534 so
+# that the gateway's port is a port too.
+[[ "${VLLM_PORT:-}" =~ ^[1-9][0-9]*$ ]] && ((VLLM_PORT < 65535)) || \
+    fail "VLLM_PORT must be a TCP port below 65535 in $PROFILE, got: ${VLLM_PORT:-}"
