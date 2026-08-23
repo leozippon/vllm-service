@@ -1,8 +1,47 @@
 # LOGBOOK
 
-此文件是面向维护者的 append-oriented 历史证据，按本地日期追加事件，不改写旧快照。
-当前操作事实以 README 与 systemd user unit（`vllm.service`、`vllm-gateway.service`、`vllm-watchdog.timer`）为准；历史条目里的配置不得当成“现在仍是如此”。
+此文件是面向维护者的历史记录：按本地日期追加事件，写清做了什么、为什么、证据在哪里、是否回滚。旧条目是当时的快照，不改写，也不得当成“现在仍是如此”——当前事实见下一节。
+
+条目格式为 动机 / 变更 / 证据·结果 / 决定·回滚。被拒绝的方案连同其理由与被接受的方案同等重要：它们挡住后来的会话去重跑同一条死路。
+
 禁止写入密钥、token、生成文本或大段评测全文。数字与路径指向证据文件，不复制其内容。
+
+## 当前状态与权威来源
+
+- 运行时事实——Python 运行时、checkpoint、served name、engine 端口、GPU 集合、CPU 核预算、vLLM 参数与运行环境、gateway 的 reasoning-effort alias——以 `config/deployments/active` 选中的 deployment profile 为准。
+- CPU 与 NUMA 绑定不写在 profile 里。`scripts/resolve-placement` 每次启动从 GPU 集合经主机 sysfs 推导，`run-vllm` 把结果 numactl 到进程上并写进启动日志。systemd unit 不含任何 CPU/NUMA 指令。
+- unit 名称、重启与启动限流策略、cgroup 限额以 `systemd/` 下的 unit 为准。架构、安装、运维、客户端配置与验证以 `README.md` 为准；测量规则以 `MEASUREMENT.md` 为准；研究证据以 `eval/` 下的 phase 文档为准。
+- 在产容量与精度以引擎自己的启动日志为准，不以本文件的历史数字为准。最近一次影响它们的变更是 2026-08-23「Phase 4 与采用 FP8 KV cache」，当时实测 1,358,930 GPU KV tokens、262,144 满长上下文 5.18×。
+
+## 证据与产物路径
+
+| 位置 | 内容 |
+| --- | --- |
+| `eval/eval_suite.py` | 评测工具；与研究实际运行位置 `/Data2/lzp/vllm-eval/eval_suite.py` 逐字节一致 |
+| `eval/PHASE1_RESULTS.md`、`eval/PHASE2_RESULTS.md`、`eval/PHASE3_CALIBRATION.md`、`eval/PHASE3_RESULTS.md`、`eval/FINAL_CONFIG.md` | Phase 1–3 的研究决定文档 |
+| `eval/reference/bf16-reference-traces.json` | trace-replay tier 的一次性 BF16 参考轨迹 |
+| `MEASUREMENT.md` | 测量规则与各 tier 的分辨力边界 |
+| `/Data2/lzp/vllm-eval/results/` | 2026-08-21 的 capture，见下表 |
+| `~/vllm-study-results/` | Phase 1–3 的逐 cell capture 与两份 incident 记录 |
+| `~/vllm-study-results/p4/` | Phase 4 的设计、结果与逐 cell 启动日志；逐题原始记录在 `/Data2/lzp/vllm-eval-p4/` |
+| `/Data2/lzp/vllm-tuning/` | L20 kernel 调优候选、runs、logs；安装清单 `install-backup/20260821-084146/` |
+| `/Data2/lzp/vllm-runtime-py311-rollback-20260822T042507Z/` | venv 改名的回滚 bundle |
+| `~/rollback/engine-phase4-20260823T034829Z/` | 切换 FP8 KV 之前的 profile 副本 |
+
+`/Data2/lzp/vllm-eval/results/` 下 2026-08-21 的逐次 capture：
+
+| 文件 | 用途 |
+| --- | --- |
+| `online-per-tensor-fp8.json` | 切换前 online per-tensor FP8 的精度与性能 |
+| `official-block-fp8.json` | 官方 serialized block FP8 的精度与性能（资源包络与 kernel 调优之前） |
+| `bf16-anchor.json` | BF16 精度基准 |
+| `official-block-fp8-resource32.json` | 16 核 / 128G / NUMA 1 / offload 32GiB 之后的 capture |
+| `official-block-fp8-kernel-tuned.json` | 安装 L20 tuned JSON 之后的 quality/perf |
+| `official-block-fp8-kernel-maxseq8.json` | 被拒绝的 maxseq=8 |
+| `official-block-fp8-kernel-batch16384.json` | 被拒绝的 batch=16384 |
+| `gateway-cap4-c8.json` | 当时默认 cap 4 下的 concurrency 8（long 为真实 429） |
+| `gateway-cap8-c8.json` | 被拒绝作为默认的 cap 8 |
+| `20260821-134205-variant-d-quality-first/` | A/B/C/D/A2 五变体对比与永久 D 部署验证 |
 
 ## 2026-08-21
 
@@ -16,35 +55,35 @@
 ### Gateway 并发保护、429 与 stream 槽位（accepted）
 
 - 动机：上游并发不能无界；队满或等不到槽位必须失败得真实，不能假装成功。
-- 变更：成功的流式响应把并发槽位持有到流结束、客户端断开或出错；队满或等待超时返回 OpenAI 风格 429，并带 `Retry-After`；默认 cap 4 / queue 8 / slot timeout 30s。
-- 证据/结果：`gateway.py`；默认值见 README 与 `.env.example`。
-- 决定/回滚：接受为默认。同日 cap 8 试验最终回滚，见后文。
+- 变更：成功的流式响应把并发槽位持有到流结束、客户端断开或出错；队满或等待超时返回 OpenAI 风格 429，并带 `Retry-After`；当日默认 cap 4 / queue 8 / slot timeout 30s。
+- 证据/结果：当日版本的 `gateway.py`。
+- 决定/回滚：接受为当日默认。同日 cap 8 试验最终回滚；这组默认值本身在当日稍晚的 gateway 加固里被重新参数化，见后文。
 
 ### Health live/ready 与 watchdog（accepted）
 
 - 动机：vLLM 冷加载可达数分钟，不能把“gateway 进程活着但上游未就绪”当成 gateway 故障而重启。
-- 变更：`/health/live` 表示进程存活，恒 200；`/health/ready` 在上游 health 为 200 时就绪，否则 503，且不含上游错误细节；`/health` 与 ready 相同，保留兼容。watchdog 每分钟探 8010 `/health`（连续 15 次失败重启 vLLM）与 8011 `/health/live`（连续 3 次失败重启 gateway）。
-- 证据/结果：`health_watchdog.sh`、`vllm-watchdog.timer`。
-- 决定/回滚：接受。
+- 变更：`/health/live` 表示进程存活，恒 200；`/health/ready` 在上游 health 为 200 时就绪，否则 503，且不含上游错误细节；`/health` 与 ready 相同，保留兼容。watchdog 每分钟探 8010 `/health`（当日阈值：连续 15 次失败重启 vLLM）与 8011 `/health/live`（连续 3 次失败重启 gateway）。
+- 证据/结果：`scripts/health-watchdog`、`systemd/vllm-watchdog.timer`。
+- 决定/回滚：接受。该 15 次阈值在 2026-08-22 引入真正的加载状态后降为 3。
 
 ### 三关键测试（accepted）
 
 - 动机：锁住必须始终成立的槽位持有、队满/超时 429、以及 live/ready 语义。
 - 变更：`test_gateway.py` 保留三项：`test_stream_holds_slot_until_done`、`test_queue_full_and_timeout_return_429`、`test_liveness_and_readiness`。
 - 证据/结果：三项通过。
-- 决定/回滚：只保留这三项，不扩大量 mock。
+- 决定/回滚：当日只保留这三项，不扩大量 mock。套件此后随每次行为变更增长，当前数量以 `unittest discover` 的实际输出为准。
 
 ### `.env` 单一来源与 hf-mirror（accepted）
 
 - 动机：计算节点没有到 `huggingface.co` 的直连；本地密钥只能有一份来源。
 - 变更：忽略的 `.env`（mode 600）持有 `VLLM_API_KEY`、`HF_TOKEN`、`HF_ENDPOINT`；进程环境变量覆盖文件值；`.env.example` 是非秘密模板，镜像为 `https://hf-mirror.com`。
-- 证据/结果：README「Local configuration」、AGENTS/CLAUDE「Network And Downloads」。本日志不记录任何密钥值。
+- 证据/结果：README 的配置边界一节，以及 `AGENTS.md`/`CLAUDE.md` 的「Network And Downloads」。本日志不记录任何密钥值。
 - 决定/回滚：接受；`.env` 永不提交。
 
 ### 官方 FP8 下载与校验（accepted）
 
 - 动机：用厂商序列化 block FP8（128×128）替代当时的 online per-tensor，并在切换前完成校验。
-- 变更：官方权重落到 `/Data/public/Qwen3.8-27B-FP8`；unit 不传 `--quantization`。
+- 变更：官方权重落到 `/Data/public/Qwen3.8-27B-FP8`；不传 `--quantization`。
 - 证据/结果：权重目录含 `crc32.txt`、`safetensors-md5sum.txt`；下载走 `.env` 中的镜像与 token。校验全文不写入本日志。
 - 决定/回滚：权重保留；是否切生产取决于随后的三方评测。
 
@@ -52,8 +91,8 @@
 
 - 动机：对 greedy、chosen-token logprob、needle、perf 做可复现 capture/compare，且拒绝覆盖结果、不打印密钥。
 - 变更：建立 `/Data2/lzp/vllm-eval/eval_suite.py`，并完成 cn→cr 修复。
-- 证据/结果：后续 capture 均由该工具写入 `/Data2/lzp/vllm-eval/results/`，见文末文件表。
-- 决定/回滚：接受为工作树外评测工具；本仓库不内嵌评测生成物。
+- 证据/结果：后续 capture 均由该工具写入 `/Data2/lzp/vllm-eval/results/`。
+- 决定/回滚：当日接受为工作树外评测工具；本仓库不内嵌评测生成物。该决定在 2026-08-22 被部分修订（工具入库，生成物仍在树外）。
 
 ### Online per-tensor / 官方 block FP8 / BF16 三方评测（accepted 官方 FP8）
 
@@ -65,14 +104,14 @@
 ### 生产切换官方 FP8（accepted）
 
 - 动机：官方权重在 greedy/needle 上与 BF16 对齐，logprob drift 可接受；online per-tensor 的 drift 不可接受。
-- 变更：`vllm.service` 的 `--model-path` 指向 `/Data/public/Qwen3.8-27B-FP8`，不传 `--quantization`；文档同步为官方 checkpoint。
-- 证据/结果：三方评测见上条；README/AGENTS/CLAUDE 于当日记录官方路径。
+- 变更：启动参数的 `--model` 指向 `/Data/public/Qwen3.8-27B-FP8`（由 `scripts/run-vllm` 传出），不传 `--quantization`；文档同步为官方 checkpoint。
+- 证据/结果：三方评测见上条。
 - 决定/回滚：生产切到官方 FP8，未回滚。
 
 ### CPU / memory / NUMA / offload 32GiB（accepted）
 
 - 动机：给 vLLM 明确的主机资源包络，并把 KV offload 定在 32GiB，而不是更大的 64GiB 猜测值。
-- 变更：unit 设 `CPUQuota=1600%`、`CPUAffinity`/`AllowedCPUs=48-63`、`NUMAPolicy=bind`、`NUMAMask=1`、`MemoryHigh=112G`、`MemoryMax=128G`、`MemorySwapMax=0`，以及 `--kv-offloading-size 32`。
+- 变更：unit 设 `CPUQuota=1600%`、`MemoryHigh=112G`、`MemoryMax=128G`、`MemorySwapMax=0`；CPU 与 NUMA 绑定不在 unit 里，由启动脚本经 numactl 施加（当时为 `--physcpubind=48-63 --membind=1`）；vLLM 参数加 `--kv-offloading-size 32`。
 - 证据/结果：`official-block-fp8-resource32.json`（约 06:31）。GPU KV 约 1,222,850 tokens / 4.66 个满长上下文；capture 时 memory current/peak 约 54.8/55.6GiB；offload mmap 31.958GiB 且在 NUMA node 1 上 100%；CPU throttle 0。
 - 决定/回滚：接受该包络与 32GiB offload。
 
@@ -108,48 +147,28 @@
 
 - 动机：短请求在 cap 4 下吃不满 GPU；试验全局 cap 8 是否可作默认。
 - 变更：对照默认 cap 4 / queue 8 / timeout 30s 与 cap 8（其余不变），concurrency 8 走 gateway。
-- 证据/结果：`gateway-cap4-c8.json`（约 10:16）、`gateway-cap8-c8.json`（约 10:24）。cap 4 short c8 = 247.89 tok/s；cap 8 short c8 = 477.03（+92.4%）。cap 4 的 long c8 在 30s slot timeout 返回真实 429；cap 8 long c8 = 22.02 tok/s，max E2E 46.44s，vLLM waiting 6 / queue_sum 118s，无 preempt/throttle。GPU KV 只有约 4.66 个满长上下文，全局 cap 8 不能保证 8 个 262K。
-- 决定/回滚：因满长容量原则拒绝把 cap 8 作为默认，回滚 cap 4。cap 8 只可作为未来短请求专用 profile，不是默认。结果文件保留。
+- 证据/结果：`gateway-cap4-c8.json`（约 10:16）、`gateway-cap8-c8.json`（约 10:24）。cap 4 short c8 = 247.89 tok/s；cap 8 short c8 = 477.03（+92.4%）。cap 4 的 long c8 在 30s slot timeout 返回真实 429；cap 8 long c8 = 22.02 tok/s，max E2E 46.44s，vLLM waiting 6 / queue_sum 118s，无 preempt/throttle。当时 GPU KV 只有约 4.66 个满长上下文，全局 cap 8 不能保证 8 个 262K。
+- 决定/回滚：当日按满长容量原则拒绝把 cap 8 作为默认，回滚 cap 4。结果文件保留。这条推理的前提在当日稍晚被换掉：gateway 被重新定位为护栏而非调节器，容量保证交回引擎调度器，见「gateway 加固与版本控制入库」。
 
-### 最终生产状态（accepted）
+### 当日状态快照（已被同日后续条目取代）
 
-- 动机：把当日仍成立的运行时写清，并与历史试验分开。
-- 变更：无新试验；默认保持如下。当前操作事实在 README 与 unit，不在本条的历史数字里。
-- 证据/结果：官方 `/Data/public/Qwen3.8-27B-FP8` serialized block 128×128；unit 不传 `--quantization`；TP2，maxlen 262144，FP8 KV，prefix cache，MTP 3，batch 8192，maxseq 默认 256，offload 32GiB。gateway 默认 cap 4 / queue 8 / slot timeout 30s。`CPUQuota=1600%`，affinity/Allowed 48–63，NUMA bind 1，MemoryHigh 112G，MemoryMax 128G，Swap 0。运行时使用 tuned L20 JSON。GPU KV 约 1,222,850 tokens / 4.66 满长上下文。
-- 决定/回滚：接受上述为当日结束时的生产状态。
+- 动机：把当时仍成立的运行时写清，并与历史试验分开。
+- 变更：无新试验。
+- 证据/结果：官方 `/Data/public/Qwen3.8-27B-FP8` serialized block 128×128，不传 `--quantization`；TP2，maxlen 262144，FP8 KV，prefix cache，MTP 3，batch 8192，maxseq 默认 256，offload 32GiB。gateway 默认 cap 4 / queue 8 / slot timeout 30s。`CPUQuota=1600%`、`MemoryHigh=112G`、`MemoryMax=128G`、Swap 0，CPU/NUMA 由 numactl 绑到 48–63 / node 1。运行时使用 tuned L20 JSON。GPU KV 约 1,222,850 tokens / 4.66 满长上下文。
+- 决定/回滚：这只是当日中段的快照。其中的 FP8 KV 与 MTP 在同日「A/B/C/D/A2 受控证据与决定」被换成 BF16 KV + MTP off，gateway 默认值在同日的 gateway 加固里被重新参数化，FP8 KV 又在 2026-08-23 以完全不同的证据重新采用。当前状态一律不从本条读取。
 
 ### 统一日志入口（accepted）
 
 - 动机：开发、调优、实验、运维、升级、故障、回滚和验证需要一份统一日志，文件名是 `LOGBOOK.md`，不是 `optimization-log.md`。
-- 变更：新建本文件；README 增加入口；AGENTS 与 CLAUDE 的 Environment 补充 16 核 / 128G / NUMA 1 / offload 32GiB，并指向本文件。二者保持字节一致。
+- 变更：新建本文件；README 增加入口；`AGENTS.md` 与 `CLAUDE.md` 指向本文件。
 - 证据/结果：仓库内文档；不修改 `gateway.py`、测试、health、`.env`、`.env.example`、pyright 或 systemd unit。
-- 决定/回滚：接受。之后只追加，不重写既有事件。
-
-## 关键结果路径
-
-评测工具：`/Data2/lzp/vllm-eval/eval_suite.py`。
-结果目录：`/Data2/lzp/vllm-eval/results/`。
-
-| 文件 | 用途 |
-| --- | --- |
-| `online-per-tensor-fp8.json` | 切换前 online per-tensor FP8 的精度与性能 |
-| `official-block-fp8.json` | 官方 serialized block FP8 的精度与性能（资源包络与 kernel 调优之前） |
-| `bf16-anchor.json` | BF16 精度基准 |
-| `official-block-fp8-resource32.json` | 16 核 / 128G / NUMA 1 / offload 32GiB 之后的 capture |
-| `official-block-fp8-kernel-tuned.json` | 安装 L20 tuned JSON 之后的 quality/perf |
-| `official-block-fp8-kernel-maxseq8.json` | 被拒绝的 maxseq=8 |
-| `official-block-fp8-kernel-batch16384.json` | 被拒绝的 batch=16384 |
-| `gateway-cap4-c8.json` | 默认 cap 4 下 concurrency 8（long 为真实 429） |
-| `gateway-cap8-c8.json` | 被拒绝作为默认的 cap 8 |
-
-Kernel 产物（工作树外，保留）：候选 JSON `/Data2/lzp/vllm-tuning/candidate/`；runs `/Data2/lzp/vllm-tuning/runs/`；logs `/Data2/lzp/vllm-tuning/logs/`；安装清单 `/Data2/lzp/vllm-tuning/install-backup/20260821-084146/`。
-
-## 2026-08-21（质量优先最终部署）
+- 决定/回滚：接受。
 
 ### 仓库与服务架构收敛（accepted）
 
-- 架构：当日重构已把单一 active deployment selector 与 trusted deployment profile 设为运行时、checkpoint、served name、推理参数及 CPU/GPU/NUMA 放置的权威来源；gateway 与 watchdog 保持稳定服务入口。`~/.config/systemd/user/` 下的 `vllm.service`、`vllm-gateway.service`、`vllm-watchdog.service`、`vllm-watchdog.timer` 均已核实链接到仓库 `systemd/` 下同名权威 unit。
+- 架构：当日重构已把单一 active deployment selector 与 trusted deployment profile 设为运行时、checkpoint、served name、推理参数与设备放置的权威来源；gateway 与 watchdog 保持稳定服务入口。`~/.config/systemd/user/` 下的四个 unit 均已核实链接到仓库 `systemd/` 下同名权威 unit。
 - 边界：本次最终切换只改 `config/deployments/qwen-3.8-27b-fp8.conf` 与本日志；未改 README、AGENTS、gateway、unit、selector、权重、served name、并发、batch、offload 或其他参数。
+- 后续：其中的 CPU/NUMA 放置在 2026-08-23 改为由 GPU 集合推导，不再写在 profile 里。
 
 ### A/B/C/D/A2 受控证据与决定（accepted D）
 
@@ -163,42 +182,177 @@ Kernel 产物（工作树外，保留）：候选 JSON `/Data2/lzp/vllm-tuning/c
 | D | BF16 (`auto`) / off | 90.338 | 161.159 | 34.142 | 0.721/1.198 | 13.092/17.460 | 10.07 | 2.76 |
 | A2 | FP8 / MTP3 | 123.390 | 115.078 | 22.875 | 0.664/1.235 | 8.547/11.616 | 6.19 | 4.66 |
 
-- 精度/API：A/B 的 FP8 KV 启动日志显示 checkpoint 没有已校准的 FP8 attention q/prob scale，实际使用 1.0 并明确警告可能影响精度；C/D 没有这些警告。A/C 的非零 `min_p` 与 `logit_bias` 因 MTP 返回 400；B/D 均返回 200，强制 token 与固定 seed 的 `min_p` 差异也证明参数实际生效。
+- 精度/API：A/B 的 FP8 KV 启动日志显示 checkpoint 没有已校准的 FP8 attention q/prob scale，实际使用 1.0 并明确警告可能影响精度；C/D 没有这些警告。A/C 的非零 `min_p` 与 `logit_bias` 因 MTP 返回 400；B/D 均返回 200，强制 token 与固定 seed 下两个 `min_p` 的 token 序列不同，证明参数确实生效。
 - Quality guard：A/B/C/D 都通过 128K、235K retrieval 和 3/3 个 reference-validated reasoning/code 检查。该小型确定性套件只是回归 guard，没有统计功效，不能证明任一 variant 的质量优越性；A2 只用于 A 重复性能测量。
-- 决定：显式质量、原生 262,144 context 与 vendor-equivalent API semantics 优先于吞吐/并发，因此永久部署 D：`--kv-cache-dtype auto` 且禁用 MTP。相对 A/A2，实测 aggregate throughput 低约 25.3%/26.8%；GPU KV 从约 1,222,850 tokens / 4.66 个满长上下文降到 724,163 / 2.76；该负载 offload traffic 从约 6.19GB 增至 10.07GB。这是已接受的容量/性能代价。
-- 精确回滚：在同一权威 profile 中把 `--kv-cache-dtype auto` 恢复为 `--kv-cache-dtype fp8`，并在 `--enable-prefix-caching` 后恢复 `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'`，其余字节保持不变，再按 owner-scoped mmap 流程仅重启 `vllm.service`。
-- 持久证据：`/Data2/lzp/vllm-eval/results/20260821-134205-variant-d-quality-first/`；只保留最终 summaries、A/B/C/D startup/API/quality JSON、原配置恢复健康状态、永久部署验证和一份汇总报告，没有 raw Prometheus、脚本、失败尝试、Authorization header 或真实凭据。
+- 决定：显式质量、原生 262,144 context 与 vendor-equivalent API semantics 优先于吞吐/并发，因此部署 D：`--kv-cache-dtype auto` 且禁用 MTP。相对 A/A2，实测 aggregate throughput 低约 25.3%/26.8%；GPU KV 从约 1,222,850 tokens / 4.66 个满长上下文降到 724,163 / 2.76；该负载 offload traffic 从约 6.19GB 增至 10.07GB。这是已接受的容量/性能代价。
+- 持久证据：`/Data2/lzp/vllm-eval/results/20260821-134205-variant-d-quality-first/`；只保留最终 summaries、A/B/C/D startup/API/quality JSON、原配置恢复健康状态、部署验证和一份汇总报告，没有 raw Prometheus、脚本、失败尝试、Authorization header 或真实凭据。
+- 后续：这条决定在 2026-08-23 被 Phase 4 推翻。当时唯一的 quality guard 自己承认没有统计功效，而 Phase 4 用有功效的配对检验重新度量了同一取舍。
 
 ### 永久 D 部署验证（accepted）
 
 - 安全重启：停机前从 `vllm.service` cgroup 精确记录其打开的 `/dev/shm/vllm_offload_2f1f7f6e-8d9c-4b6e-b1ce-65e2192d1b91.mmap`（inode `27:18513595`）；stop 后该文件已自行消失，因此未删除任何 mmap，更未使用全局 glob。只重启 backend，126 秒恢复健康；gateway 与 watchdog timer 的 invocation ID 未变化且持续 active。
-- 有效状态：进程参数为 max context 262144、TP2、显式 `--kv-cache-dtype auto`，没有 `--speculative-config`；启动配置为 `dtype=torch.bfloat16`、`kv_cache_dtype=auto`、`speculative_config=None`，即 BF16 compute/KV。容量为 22.55GiB / 724,163 GPU KV tokens / 2.76 个 262K context。启动日志无 uncalibrated FP8-KV q/prob scale 警告，五个 tuned L20 W8A8 block-FP8 weight kernel JSON 均加载。
+- 有效状态：进程参数为 max context 262144、TP2、显式 `--kv-cache-dtype auto`，没有 `--speculative-config`；启动配置为 `dtype=torch.bfloat16`、`kv_cache_dtype=auto`、`speculative_config=None`。容量为 22.55GiB / 724,163 GPU KV tokens / 2.76 个 262K context。启动日志无 uncalibrated FP8-KV q/prob scale 警告，五个 tuned L20 W8A8 block-FP8 weight kernel JSON 均加载。
 - Live/API：backend health、gateway live/ready、带认证 models 均为 200 且只返回 `qwen-3.8-27b-fp8`，未认证 models 为 401；一次 `xhigh` 最高推理请求为 200、有 reasoning 且答案校验通过；`logit_bias`、`min_p=0`、非零 `min_p=0.95` 均为 200，强制 token 命中且两个 `min_p` token 序列不同。
-- 仓库验证：Bash syntax、四个 systemd unit verify、gateway import、Python compile、4 项 unittest 均通过；Python primary LSP 为 0 finding。未改的 `gateway.py` 仍有 3 个 auxiliary 静态规则提示（两个 unchecked-throwing-call、一个 env secret-name heuristic），不属于本次 profile 决策范围；未据此改变 gateway 行为。
-- 剩余限制：quality guard 不具统计功效；D 的满长并发和吞吐较低、offload 较高，容量规划必须按 2.76 个满长 GPU-KV context 而非原 4.66 执行。
+- 仓库验证：Bash syntax、四个 systemd unit verify、gateway import、Python compile、当时的 4 项 unittest 均通过；Python primary LSP 为 0 finding。
+- 剩余限制：quality guard 不具统计功效；D 的满长并发和吞吐较低、offload 较高，当时的容量规划按 2.76 个满长 GPU-KV context 执行。
 
 ### 测试布局整理（accepted）
 
-- 变更：两项测试移入 `tests/`，watchdog 测试按新位置解析仓库根目录；README 改用根目录下的标准 unittest discovery。`LOGBOOK.md` 继续作为根目录唯一的追加式运维、决策与回滚记录。
-- 决定：`gateway.py` 保留在根目录，继续作为唯一运行时模块和明确的 ASGI 入口；只有出现第二个内聚运行时模块、真实需要 package 时才迁移。`pyrightconfig.json` 保留在根目录，以维持 Pyright 的项目配置自动发现，不引入显式 `-p` 依赖。
+- 变更：两项测试移入 `tests/`，watchdog 测试按新位置解析仓库根目录；README 改用根目录下的标准 unittest discovery。
+- 决定：`gateway.py` 保留在根目录，继续作为唯一运行时模块和明确的 ASGI 入口；只有出现第二个内聚运行时模块、真实需要 package 时才迁移。`pyrightconfig.json` 保留在根目录，以维持 Pyright 的项目配置自动发现。
 - 证据/结果：Python primary LSP 3 文件 0 finding；gateway 仓库根目录 import、Python compile 与标准 discovery 的 4 项 unittest 均通过；backend health、gateway live/ready、认证 models 均为 200，相关服务与 watchdog timer 保持 active，未重启服务。
 - 回滚：将两项测试移回根目录，恢复 watchdog 相对路径与 README 验证命令；本次无运行时或服务配置需要回滚。
-
-## 2026-08-21（运行时 venv 命名迁移）
 
 ### canonical venv rename（accepted）
 
 - 动机/变更：把带模型代号的 `/Data/public/.venvs/vllm-qwen38` 同文件系统原子改名为通用的 `/Data/public/.venvs/vllm-runtime-py311`；修复 `pyvenv.cfg`、56 个 bin shebang、3 个 activation script 与 vLLM console-script RECORD，并删除旧 bytecode；活动引用只改 deployment profile 的 `VLLM_PYTHON`/runtime `PATH`、Pyright venv 名和三份 tuning script 默认路径。
-- 不变项：GPU 6–7、TP2、BF16 compute / `auto` KV、MTP off、262144 context、batch 8192、prefix caching、32 GiB offload、gateway cap 4 / queue 8 / timeout 30s，以及 model、parser、unit、launcher、selector、gateway、测试和 `.env` 均未改变。
-- 身份/启动证据：package inventory SHA-256 `dafd8afe010be286c2f377e453dc20b053edfc83e22a95669cb918a16b1fe081`；`vllm==0.27.1` commit `g6e448d0ea`，7,098 条 RECORD 结构与既有 supplied hashes 保持验证；五份 mode 0644 tuned L20 JSON 的既有 SHA-256 保持不变并由新路径启动日志全部加载。installed CUDA source 动态导出的必需扩展为 `vllm._C_stable_libtorch`，旧/新路径均成功导入，`vllm._custom_ops` 也成功。
-- 运行/API/测试：backend 约 258 秒恢复 health；TP0/TP1 分别在物理 GPU 6/7；backend health、gateway live/ready、认证 models 为 200，未认证 models 为 401；一次 `reasoning_effort=xhigh` 返回非空 reasoning（681 chars）且答案 `42` 校验通过；repository unittest 4/4 通过。
-- 回滚：bundle 为 `/Data2/lzp/vllm-runtime-py311-rollback-20260822T042507Z/`；失败时先精确记录当前 `vllm.service` mmap，再在 attached shell 执行该目录的 `rollback.sh EXACT_FAILED_SERVICE_MMAP`，其归档会恢复旧目录、venv metadata/bin/RECORD 与全部 maintained files，并等待旧 stack healthy。
+- 不变项：GPU 6–7、TP2、BF16 compute / `auto` KV、MTP off、262144 context、batch 8192、prefix caching、32 GiB offload、gateway 当时的并发默认值，以及 model、parser、unit、launcher、selector、gateway、测试和 `.env` 均未改变。
+- 身份/启动证据：package inventory SHA-256 `dafd8afe010be286c2f377e453dc20b053edfc83e22a95669cb918a16b1fe081`；`vllm==0.27.1` commit `g6e448d0ea`，7,098 条 RECORD 结构与既有 supplied hashes 保持验证；五份 mode 0644 tuned L20 JSON 的既有 SHA-256 保持不变并由新路径启动日志全部加载；installed CUDA source 动态导出的必需扩展 `vllm._C_stable_libtorch` 与 `vllm._custom_ops` 在新旧路径均成功导入。
+- 运行/API/测试：backend 约 258 秒恢复 health；TP0/TP1 分别在物理 GPU 6/7；backend health、gateway live/ready、认证 models 为 200，未认证 models 为 401；一次 `reasoning_effort=xhigh` 返回非空 reasoning（681 chars）且答案校验通过；repository unittest 4/4 通过。
+- 回滚：bundle 为 `/Data2/lzp/vllm-runtime-py311-rollback-20260822T042507Z/`；失败时先精确记录当前 `vllm.service` mmap，再在 attached shell 执行该目录的 `rollback.sh EXACT_FAILED_SERVICE_MMAP`。
+
+### gateway 加固与版本控制入库（accepted）
+
+- 动机：本仓库此前不是 git 仓库，没有任何文件有历史，AGENTS/CLAUDE 的「Git and Delivery」整节不可执行。同时 gateway 上有几处“报告得不真实”的行为需要一并修掉再入库。
+- 变更（先加固后入库，一并进入初始 commit）：并发准入被重新参数化为护栏而不是主要调节器——默认 cap 4 / queue 8 / 30s 改为 in-flight 32 / queue 32 / 等待 300s，理由是引擎调度器才是 prefix-cache 与 KV 感知的一方，gateway 对此完全盲。超时分类拆开，上游读超时返回 504 而不是伪装成 502（`httpx.ReadTimeout` 是 `RequestError` 的子类，先前被误分类）；health 探测另给一个短超时，避免上游卡死时 `/health/ready` 挂满读超时；SSE 流中途失败发出 OpenAI 形状的错误帧而不再静默停住（非流式没有安全的带内错误帧，改为让传输层报告截断）；header 以原始字节转发；`reasoning_effort` 的 `high` 归一化。非流式生成没有中途字节，读超时因此界定整次生成，默认 3600s。
+- 变更：初始 commit 把工作中的部署整体纳入版本控制——gateway、deployment profile 与 selector、入口脚本、四个 systemd user unit 与运维文档；`.env`、Python 缓存与任务产物由 `.gitignore` 排除，`.env.example` 留作非秘密模板。
+- 证据/结果：`tests/test_gateway_socket.py` 让至少一项测试真正走 socket 上的 HTTP，先前 504/502 与流中途失败这两个缺陷正好活在那个空隙里。
+- 决定/回滚：接受。此后每次行为变更都以独立 commit 落库，本日志与 commit body 互为索引。
 
 ## 2026-08-22
+
+### Phase 1：显式 KV 池；拒绝 max-num-seqs 32（accepted / rejected）
+
+- 动机：内存 profiler 按 CUDA graph 的**估计值** 1.99 GiB/rank 扣减，而实际只用 0.42 GiB，这段差额被扣住不给 KV 池。
+- 变更：用显式 `--kv-cache-memory-bytes 27000000000` 取代隐式的 gpu-memory-utilization 比例。取值刻意落在引擎自己给出的变更后锚点 28,480,849,408 之下，保留约 1.5 GiB 余量——池子过大不是在启动时失败，而是在 CUDA graph capture 时失败。
+- 证据/结果：GPU KV 724,163 → 807,188 tokens，262,144 满长并发 2.76× → 3.08×。精度影响恰好为零：对 BF16 参考的 teacher-forced logprob drift 0.000000，40,429 个位置 0 次 argmax flip，而该仪器的噪声底由同 boot 与跨 boot 重复实测为零。aggregate 吞吐与基线相差 0.03%，10 项 API conformance 全过。稳态 3.2 核、约 41 GiB charged working set，CPU throttle 与 cgroup memory event 均为零。`eval/PHASE1_RESULTS.md`。
+- 同期拒绝：`--max-num-seqs 32` 配显式 `cudagraph_capture_sizes` 列表。它不带来任何额外容量（KV token 与并发一字未变），却花掉 2.1% aggregate 吞吐和 18% 的短 prompt TTFT p95，并且改变 torch.compile hash——单是一次重编译就让 tier-1 精度移动约 0.57 mean / 2.8 pp，这本身会污染后续所有比较。
+- 决定/回滚：接受显式字节数，拒绝 maxseq/capture-list 组合。回滚即删除该行。
+
+### Phase 2：KV 池回退；拒绝三条精度分支（accepted / rejected）
+
+- 事故与动机：`27000000000` 比引擎自己的“完全利用显存”锚点 26,055,386,624 高出 944 MB，超额占用设备。它在自己那次启动上活了下来，却在后来一次启动上以 `EngineDeadError` 杀死引擎——一次约 956 MiB 的分配正好撞上 peak activation。关键教训是失败点不在启动：过大的 KV 池在 CUDA graph capture 阶段才失败，所以一次“看起来成功”的启动完全不能证明这个值是安全的。
+- 变更：降到 `26000000000`，取回约 1 GiB 设备余量。
+- 证据/结果：容量 777,975 KV tokens / 2.97× 满长并发（不安全值为 807,188 / 3.08×）；负载差异不可测（aggregate +0.80%，long E2E p50 −1.85%，其余在噪声内）；对 BF16 参考的 drift 仍是 0.000000 / 0 flips，conformance 10/10。`eval/PHASE2_RESULTS.md`、`eval/FINAL_CONFIG.md`。
+- 拒绝 `fp8_per_token_head`（TRITON_ATTN）：它兑现了预测的 5.35× 容量，动态 per-token-head 定标完全不需要校准，也不产生任何 scale 警告——按精度它是好的。但它强制 TRITON_ATTN，而短 prompt TTFT p95 从 0.59 s 炸到 **6.97 s**，aggregate −3.5%、long TPOT +4.0%。**按性能拒绝，不是按精度拒绝**。
+- 拒绝 `int8_per_token_head`：deep tier 上是所有量化选项里最准的（2.08 pp），容量与上者相同，但最慢：aggregate −4.8%、long TPOT +5.5%、短 TTFT p95 6.06 s。
+- 拒绝 MTP（k=2）：在目标并发 4–8 上实测 aggregate −0.57%、long TPOT p50 **+7.2%**，与历史上并发 3 时记录的 +33.8% **符号相反**。接受率本身是健康的（整体 72.8%，每 draft 1.456 个 token，深度 1/2 为 81.5%/64.1%）——speculation 在 batch 8 上就是不划算。它另外吃掉 9% 容量，`min_p` 与 `logit_bias` 返回 400（conformance 8/10），还暴露一个未解释的缺陷：MTP + `prompt_logprobs` 在 30 篇 teacher-forced 重放文档里有 6 篇（198–466 prompt tokens）出现 86–100% 的 top-1 不一致与 9–12.5 nats 的散度，其余 24 篇正常。设计原本要求把 `min_p`/`logit_bias` 的破坏作为一个取舍抛给用户；既然没有任何收益可换，就没有需要问的问题。
+- 一条被测量推翻的 Phase 1 结论：TRITON_ATTN 的门禁是对着一个被污染的对照打的——那个对照同时带着已被单独拒绝的 `--max-num-seqs 32`。对着真正上线的配置重测，TRITON_ATTN 没有 decode 收益（long TPOT p50 +0.67%，在噪声内），还要花 1.67% aggregate、13.9% long TTFT p95、18.9% 短 E2E p95。整条 per-token-head 分支一直在付一笔门禁替它掩盖掉的 kernel 税。
+- 决定/回滚：回到 `26000000000`；三条分支均不上线，测量数据保留以免重跑。
+
+### `/dev/shm` KV offload 区域泄漏与回收（accepted）
+
+- 事故：vLLM 只在 `SharedOffloadRegion.cleanup()` 里 unlink `/dev/shm/vllm_offload_<engine-id>.mmap`，被 SIGTERM 的引擎永远走不到那里，因此每次重启都泄漏一个 34.32 GB 的区域。累计 8 个孤儿达到 **274.6 GB**，填满 252 GB 的 `/dev/shm`，把 NUMA node 1 的可用内存压到 2 GB，并导致一次启动被主机 OOM 杀掉。
+- 变更：`run-vllm` 在分配新区域之前清扫孤儿。只有同时被证明“属于我们”（普通文件、名字匹配 `vllm_offload_*.mmap`、属主是本进程有效 UID；vLLM 以 0600 创建区域，`/dev/shm` 是 sticky 的，内核本身也拦着）和“无人使用”（读 `/proc/<pid>/fd` 与 `/proc/<pid>/maps`，没有任何活进程持有其描述符或映射）才会删除。证明不了的一律原样留下，回收失败绝不阻止引擎服务。
+- 证据/结果：对着在跑的引擎验证——它自己的区域被正确留下，引擎保持健康。测试用真实文件与真实持有进程驱动真实脚本，覆盖描述符与仅映射两条存活路径。
+- 决定/回滚：接受。此前的做法是人工精确记录 mmap 再重启，现在这件事在每次启动自动完成。
+
+### 入口脚本前言合并；`--api-key` 实现后被推翻（accepted / reverted）
+
+- 动机：`run-vllm` 与 `run-gateway` 各带约 20 行几乎相同的前言，而这个分歧已经造成了缺陷：只有 `run-gateway` 在 source profile 之前清掉继承值，所以一个继承来的 `VLLM_SERVED_MODEL_NAME` 能悄悄满足 `run-vllm` 的“必须在 profile 里”检查。
+- 变更：两者共用 `scripts/_profile.sh`，由它解析 active profile 并清掉 profile 拥有的每一个名字。`VLLM_GPUS` 过去被校验却从不使用，现在成为 `CUDA_VISIBLE_DEVICES` 的来源（`VLLM_RUNTIME_ENV` 里显式给出的仍然优先，因此当日行为逐字节不变）。host check 的注释不再声称 `free -h` 会失败。
+- **实现后被测量推翻**：审计给出的“一行高价值修复”是把 `VLLM_API_KEY` 作为 `--api-key` 传给 vLLM，理由是当前只靠 vLLM 的环境变量默认值鉴权。照做之后测量发现，这台 47 租户主机上 `/proc/<pid>/cmdline` 全局可读，而且 vLLM 会把解析后的参数回显进 journal——这个 flag 会把生产凭据公开给机器上每一个用户。因此**实现、测量、回退**：改为由一个测试钉住密钥永不出现在命令行，并由就绪门禁在每次启动断言未认证请求确实被拒绝。审计提出的风险是真的，它给的修复不是。
+- 证据/结果：重启 `vllm.service` 验证，引擎按真实 profile 起来，未认证 `/v1/models` 401、带凭据 200。新测试把两个脚本当作真实进程对着一次性目录树运行。
+
+### 让 `vllm.service` 有真正的加载状态，让 watchdog 说实话（accepted）
+
+- 动机：systemd 里根本没有“引擎正在加载”这个状态。`Type=simple` 让 unit 从多分钟模型加载的第一秒起就是 active，`TimeoutStartSec` 因此是惰性的，watchdog 的 `activating` 跳过分支永远不可达。watchdog 只能靠 15 个周期的阈值撑住冷启动；而因为 `systemctl restart` 对一个正在加载的 unit 总是成功，它每分钟重置自己的计数器并退出 0——**一个永远不服务的系统每分钟报告一次成功**，直接违反 Failure Principle。
+- 变更：`scripts/wait-ready` 作为 `ExecStartPost` 阻塞到服务器应答 `/health`，unit 因此在 activating/start-post 里停留整个加载过程，上界是 `TimeoutStartSec=20min`。它每轮检查 `$MAINPID`（systemd 在主进程死后仍停在 start-post，没有这个检查，一次崩掉的加载会把自己的重启拖满整个启动超时），并断言未认证的 `/v1/models` 被拒绝——这正是让 `run-vllm` 那个 `VLLM_API_KEY` 检查有意义、又不必把密钥放到全局可读命令行上的办法。两个长驻 unit 加 `StartLimitIntervalSec`/`StartLimitBurst` 让限流器真正可达：`RestartSec=5s` 的间隔对管理器默认的 10s/5 太宽，致命故障会永远重启而不进入 failed。恢复动作是 `systemctl --user reset-failed` 后 `start`。watchdog 阈值 15 → 3（现在只需要给运行中的引擎去抖），防御性读取计数器，用 `--no-block` 重启以免 10 分钟的 stop 拖住 gateway 探测，并对任何失败探测返回非零——包括那些重启成功的：重启是干预，不是健康。
+- 证据/结果：实测一次冷加载中 unit 在 activating/start-post 停留 2m26s，只有引擎真的服务时才进入 active；同一窗口内手工运行 watchdog 打印 `backend skip (activating)`、以 0 退出且计数器未动；就绪门禁对健康引擎 35 ms 退出 0。`.env.example` 同步为实际默认值。
+
+### 拒绝 prompt-logprob 请求（accepted）
+
+- 事故：一次普通的、已认证的请求带上 `prompt_logprobs`，让引擎跳过 prefix cache、按 8192 token 分块重新 prefill 整个 prompt，并物化一个 8192 × 248,320 的 logits 张量；设备内存耗尽，引擎被终止，systemd 重启了服务。这发生在研究开始时，是一次意外，不是攻击。
+- 变更：gateway 以 OpenAI 形状的 400 拒绝，说明拒绝了什么、为什么；不改写任何响应体，且拒绝发生在取得槽位之前。`echo` 一并覆盖，因为 vLLM 由它推导 prompt logprobs：chat completions 的 `top_logprobs` 默认 0 而不是 null，因此总会请求；completions 的 `logprobs` 默认 null，只有客户端设了才请求——后一种情况仍是 200，`echo` 在那里无害。原始字节预过滤让普通流量不必为一次 JSON 往返买单。
+- 决定/回滚：这是真实的能力削减，如实记录：gateway 上没有 prompt logprobs。需要它的测量工作直接访问引擎自己的 loopback 端口，harness 也据此把 teacher forcing 的 prompt 长度在客户端封顶。
+
+### Phase 3：复现、校准问题，与被推翻的短 TTFT p95 结论（accepted 结论，未改生产）
+
+- 动机：Phase 2 把 FlashInfer + `fp8_e4m3` 标为测过的最快、容量最高的配置，却按“不得有未校准 scale 警告”这条硬线、以及 short TTFT p95 +121% 拒绝了它。两个理由都需要复核。
+- 复现：候选与对照在三次启动上复现到 aggregate 0.07–0.12%、long TPOT p50 0.20–0.32%，比 Phase 1 假定的噪声底紧十倍。
+- **short TTFT p95 不是统计量**：同一启动、同一配置的两次运行相差 20.9%，配置内跨度 21–58%。n≈102 时 p95 是第 97 大的样本，由碰巧排在一次分块长 prefill 后面的两三个请求决定。Phase 2 那个“+121%”从来不曾脱离噪声。把重复运行汇总（n=279–306）之后，FP8 反而拥有所有配置里**最快的中位首 token**（p50 −0.132 s），代价是 p90 +0.074 s；而短对话真正等的是整条回复：FP8 每 token 快 5.13 ms，256 token 的回复端到端**快 1.30 s**，约为首 token 代价的 19 倍。
+- **深上下文漂移是 kernel 效应而不是精度效应**：以生产 FLASH_ATTN 引擎为共同参照，BF16 的 FlashInfer 对照是 2.10 pp argmax flip，FP8 是 **0.79 pp**——换 attention kernel 比把 KV 量化到 FP8 移动得更多。needle grid 100/100（含 250k 处 25/25），且没有随深度增长的饱和特征：最深的一档反而最干净。
+- 另一处记录更正：Phase 1/2 报告的 deep tier 非确定性是 **FLASH_ATTN 的属性**，不是仪器的属性。在 FlashInfer 上该 tier 跨启动 100% 精确为零。把 0.26 pp 当作“仪器噪声底”会白白报废一个在另一个 backend 上完全精确的 tier。
+- 拒绝 `--calculate-kv-scales`（无效）：对本架构，它在任何层被构造之前就被 hybrid 模型钩子关掉（48 个 GDN 层），产生的引擎配置与不加它逐字节相同，警告一字未变。更值得记的陷阱是：在**非** hybrid 模型上，它会取第一次真实前向的单批 amax、随即自我关闭，而因为该警告只在 `not calculate_kv_scales` 分支发出，它会在完全没有改善精度的情况下**让警告消失**——伸手去拿这个 flag 是买静音，不是买校准。没有为它花一次负载运行：把一个 no-op 测两遍是充数，不是证据。
+- 不可能项 `fp8_e5m2` 差分探针：引擎直接拒绝该配置（`fp8_e5m2 kv-cache is not supported with fp8 checkpoints`），e5m2 KV 只在 checkpoint 带 `kv_cache_scheme` 时允许，本厂商 block-FP8 checkpoint 没有。启动失败被 harness 捕获，自动恢复 known-good profile 并复验健康，服务未曾中断。
+- 评估后不做的离线校准：`llmcompressor`/`modelopt` 未安装且无网络出口；自制校准需要 27.8 B 模型常驻并在 16 个 full-attention 层挂 forward hook，跑不进生产服务形状；结果还要写回 30 GB 厂商 checkpoint，把仓库刻意原样运行的厂商产物 fork 掉。上游对 hybrid recurrent 模型的这套做法本身也持否定态度。
+- 决定：不单方面采用 FP8，生产留在 BF16，把判断交给用户；但把 Phase 2 的两条拒绝理由分别改判为“该统计量不可测量”和“可在证据上豁免”，并明确指出还缺两件事：自由生成的推理正确性，以及长 decode 驻留后的精度。`eval/PHASE3_CALIBRATION.md`、`eval/PHASE3_RESULTS.md`。
 
 ### 评测工具入库（accepted，修订「不内嵌」决定）
 
 - 动机：`eval_suite.py` 是 LOGBOOK 全部调优决定与 Phase 1–3 研究的唯一可复现基础，却没有版本控制，所在文件系统已用到 86%，丢失即失去在产配置的审计链。
-- 变更：把 `/Data2/lzp/vllm-eval/eval_suite.py` 逐字节导入 `eval/eval_suite.py`，不重构、不做模型无关化（模型无关化留到待定研究结束之后，以免改动 corpus 或 prompt 使既有 reference 失效）。把只存在于 home 目录的研究决定文档一并导入 `eval/`，按仓库命名约定改为 UPPER_SNAKE_CASE：`PHASE1_RESULTS.md`、`PHASE2_RESULTS.md`、`PHASE3_CALIBRATION.md`、`PHASE3_RESULTS.md`、`FINAL_CONFIG.md`。`.gitignore` 增加 `eval/results/` 与 `eval/corpus/`。未改 `scripts/`、`systemd/`、`config/`、`gateway.py`、`tests/`、`.env.example`，未重启任何服务。
+- 变更：把 `/Data2/lzp/vllm-eval/eval_suite.py` 逐字节导入 `eval/eval_suite.py`，不重构、不做模型无关化（模型无关化留到待定研究结束之后，以免改动 corpus 或 prompt 使既有 reference 失效）。把只存在于 home 目录的研究决定文档一并导入 `eval/`，按仓库命名约定改为 UPPER_SNAKE_CASE。`.gitignore` 增加 `eval/results/` 与 `eval/corpus/`。未改 `scripts/`、`systemd/`、`config/`、`gateway.py`、`tests/`、`.env.example`，未重启任何服务。
 - 证据/结果：六个文件 `cmp` 全部与来源逐字节一致，`eval_suite.py` SHA-256 `5d79086cbc32f75040c6075e502416d404680047d4708ea4b46cabe913cce139`；用部署 profile 的 Python 3.11.15 `py_compile` 通过，仓库副本 `self-check` 离线自检通过；`unittest discover` 36 项通过。
-- 决定/回滚：修订 2026-08-21「接受为工作树外评测工具；本仓库不内嵌评测生成物」——生成物（results、corpus）仍留在树外并按路径引用，工具本身是代码，入库。`/Data2/lzp/vllm-eval/` 的工作副本不动，仍是研究实际运行位置，导入时与仓库副本字节一致；何时改用仓库副本另行决定。原始 study 目录下的逐 cell 工作笔记与两份 incident 记录未入库，其结论已在上述 phase 文档中。
+- 决定/回滚：修订 2026-08-21「接受为工作树外评测工具；本仓库不内嵌评测生成物」——生成物（results、corpus）仍留在树外并按路径引用，工具本身是代码，入库。`/Data2/lzp/vllm-eval/` 的工作副本不动，仍是研究实际运行位置。原始 study 目录下的逐 cell 工作笔记与两份 incident 记录未入库，其结论已在 phase 文档中。
+
+### 测量规则成文（accepted）
+
+- 动机：Phase 1–3 产生的“怎样才算诚实地测量这个服务”的知识没有任何持久去处：匹配 compile hash 的对照要求、每个指标实测的噪声底、哪些数根本不是统计量、精度底属于哪个 backend、那次要掉一条引擎命的 `prompt_logprobs` 危险、每个 tier 能分辨什么，以及没有任何 phase 关闭的两个缺口。写下来，正是为了让已经犯过的那两次昂贵错误——对着被污染的对照打门禁、用单次 p95 做拒绝——不再重演。
+- 变更：新增 `MEASUREMENT.md`。phase 文档仍是证据，本日志仍是历史，README 只得到一个指针，不复述任何数字。
+- 决定/回滚：接受为常设规则。纯文档变更，未改脚本、unit、profile 或 gateway，未重启服务。
+
+### 保留 BF16 参考推理轨迹（accepted）
+
+- 动机：trace-replay 精度 tier 靠一次性在 BF16 参考配置上生成的推理轨迹给候选打分。harness 本身就把它们标为“只生成一次”，它们与某个 stack 状态绑定：venv、vLLM build 或生产精度一变，重新生成就会得到不同的参考，并终结与既有分数的可比性。唯一副本原本在即将被清理的研究输出目录里。
+- 变更：91 KB，作为 fixture 入 `eval/reference/`。这是未来测量的参考**输入**而不是测量结果，因此不推翻“评测生成物不入库”的决定。
+- 证据/结果：sha256 `4d6c774bb1312338d10f38b03e948e76bef632a155fc0551dd29deec849fc746`。
+
+## 2026-08-23
+
+### Phase 4 与采用 FP8 KV cache（accepted）
+
+- 动机：Phase 3 之后剩下的是一个纯残余风险判断，而它依赖的两件事——自由生成的推理正确性、长 decode 驻留之后的精度——在此前任何 phase 都没有被测过。用户的第一优先级是不让推理能力退化，这种量级的变更不能建立在冒烟测试上。
+- 变更：`--kv-cache-dtype auto` → `--kv-cache-dtype fp8_e4m3`（该 dtype 直接选中 FlashInfer backend），并**移除** `--kv-cache-memory-bytes`：Phase 3 与 Phase 4 里每一次 FP8 启动都是引擎按 0.92 自行定尺寸的，把 FP8 与更大的显式池配对从未被测量，不能未经测试就上线。profile 其余部分逐字节未变。
+- 容量与性能：GPU KV 777,975 → **1,358,930** tokens，262,144 满长并发 2.97× → **5.18×**，“并发 ≥ 4 且保持原生上下文”这条要求由此在满长上就成立；aggregate 吞吐 +7.7%（Phase 3 独立测得 +6.6%），long TPOT −14.2%（一次 3,000 token 的 `xhigh` 推理轮次快 17.2 s），长请求端到端每轮 −13.3 s、四轮 agent 会话 −53 s，短对话每轮端到端 −1.30 s，同负载下 KV 压力 37% → 24%。唯一的长边回归是 long TTFT p95 +2.29 s。
+- 自由生成推理正确性，N=402 配对：252 条 MMLU-Pro 分层覆盖全部 14 个 category，150 条 level ≥ 3 的 MATH-500；greedy、固定 seed、相同 prompt 与顺序、`reasoning_effort: xhigh`，配对 McNemar 精确检验。达成灵敏度为 80% power 下可检出 **3.4 pp**。生产 81.34%，FP8 82.84%，p = 0.308，95% CI [−1.12, +3.73] pp；对着同 kernel 的 BF16 对照则是 −0.25 pp，p = 1.000。
+- **零假设臂是这一节的关键**：把生产配置对着它自己重启一次再跑，402 题里 25 题不一致、摆动 +0.75 pp；换成 FP8 是 24 题不一致、+1.49 pp——比零假设臂**更少**的不一致项，方向与幅度相同。并发 32 下的自由 greedy 生成本来就在约 6% 的题目层面上是混沌的，FP8 没有往上加。
+- 长 decode 驻留（此前从未测过）：每题生成约 9,591–10,410 token 的账本任务，逐步精确模算并按 (题, 步) 配对。FP8 在全部 **1,040** 个步骤和全部 **128** 次长程自回忆（内容只存在于 decode 写入的 KV 里）上全对，与生产完全一致，把 FP8 引起的深 decode 步骤错误率单侧 95% 上界压到 **0.38 pp**。整个矩阵里唯一出过账本错误的配置是 **FlashInfer + 普通 BF16 KV**，不是 FP8。
+- greedy 分歧：并发 1 下引擎跨重启逐 token 可复现（24/24 相同，21,018 个比较 token 零分歧），因此任何分歧都可归因。FP8 对生成轨迹的扰动不比在相同 BF16 精度下换 attention kernel 更大（首次分歧中位 46 vs 48 token），且其风险不随 decode 位置上升——那正是“累积驻留误差”必须留下的特征。
+- 上线后核验：146 s 恢复健康，NRestarts=0；engine `/health` 与 `/v1/models` 200，gateway live 200，一次经 gateway 的 `xhigh` 端到端补全 finish_reason stop 且答案正确；`num_preemptions_total` 0；`/dev/shm` 252 GB 中用 32 GB、一个活的 offload 区域；cgroup 42.9 GiB，`nr_throttled` 0/1,856 periods，`memory.events` 全零。
+- 残余与未覆盖，如实记录：未校准的 `k_scale = v_scale = 1.0` 警告仍在，Phase 3 已确认在本 build 与本 checkpoint 上无法用任何可用手段清除——`--calculate-kv-scales` 对 hybrid 模型被强制关闭，checkpoint 不带 KV scale 张量，FlashInfer 路径上不存在任何动态定标的 FP8 dtype，e5m2 对 fp8 checkpoint 被拒绝。在浮点格式上 scale 1.0 是**恒等**定标，代价是动态范围余量而不是相对精度，而且 query 从未被量化（`prefill=bf16, decode=bf16`）；本次未发现它的任何行为后果。未覆盖：agentic 多轮编码（本机没有可评分的参考数据，只经由未评分的分歧探针间接覆盖）、任何小于约 3 pp 的变化、以及持续数小时的生产流量（本次最长的连续 FP8 负载是并发 32 下约 35 分钟的正确性运行，零错误）。
+- 证据：`~/vllm-study-results/p4/`，设计与功效计算在第一次比较运行**之前**冻结。四次启动、十二次运行、4,824 次评分自由生成、390 万生成 token，零请求错误。
+- 回滚：一行加一次重启——把 `--kv-cache-dtype auto` 放回并恢复 `--kv-cache-memory-bytes 26000000000`，然后重启 `vllm.service`。变更前的 profile 副本在 `~/rollback/engine-phase4-20260823T034829Z/`。
+
+### `VLLM_DEPLOYMENT` 覆盖 active selector（accepted）
+
+- 动机：研究要启动候选 profile，此前只能覆写生产 selector 或覆写生产 profile 本身。
+- 变更：selector 仍是默认值，环境里的 `VLLM_DEPLOYMENT` 优先。该名字刻意不在共享前言的 unset 列表里——与 profile 自己拥有的名字不同，它按设计就是从环境来的。
+- 证据/结果：今天行为逐字节不变，因为没有任何地方设置它。它同时是将来做 per-instance unit 的挂点：所有入口脚本都经同一段前言解析 profile，因此不需要再改其中任何一个。
+
+### 端口在 profile 里声明一次（accepted）
+
+- 动机：8010/8011 这一对被写在 profile、`run-gateway`、`wait-ready`、`health-watchdog` 和 `.env.example` 五处。一个不声明自己端口的 profile 无法被复制到 8010 已被占用的机器上——本机就有其他租户占着 8000、8001、8020、8030、8040、8050、8060——而 `.env` 覆盖是按 unit 加载的，能扩展到“另一台机器”，扩展不到“第二个实例”。
+- 变更：profile 声明 `VLLM_PORT`；引擎绑定它，gateway 在下一个端口应答并代理到它，两个健康探测都从它派生。`--port` 离开 `VLLM_ARGS`，五处默认值收敛到一处，在共享前言里校验一次。`wait-ready` 与 `health-watchdog` 也改为 source 那段前言，因此一个不可读的 profile 会让启动失败、让 watchdog 这一轮判为不健康——这是诚实的结果：那时没有任何东西能说出这个部署应该在哪里应答。
+- 证据/结果：整组一次落地是刻意的——在仍有消费者硬编码 8010 的情况下先从 `VLLM_ARGS` 移除 `--port`，会在完整模型加载之后才失败，而门禁在轮询一个没人绑定的端口。变更成为 load-bearing 之前先验证：`run-vllm` 与 `run-gateway` 用生产 profile 的值经记录器 dry-run，产出 `--port 8010` / `--port 8011`、upstream `http://127.0.0.1:8010`、numactl 绑定 48-63；真实的 `wait-ready` 与 `health-watchdog` 对着在跑的服务运行，都派生出 8010/8011 并报告健康。43 项测试通过。
+
+### CPU 与 NUMA 放置由 GPU 集合推导（accepted）
+
+- 动机：`VLLM_CPU_AFFINITY` 与 `VLLM_NUMA_NODES` 是按本机拓扑手算的，也是 deployment profile 里唯一一处换台机器就会**静默出错**的东西：错误的 node 会在这个部署的整个生命周期里付跨 socket 内存带宽的代价，而没有任何东西会报告它。
+- 变更：GPU 集合是操作者唯一需要陈述的放置事实，node 与 CPU 池现在都由它经 sysfs 推导，得到的绑定写进启动记录。核数仍显式保留为 `VLLM_CPU_CORES`——那是策略（这个部署在共享主机上可以占用该 node 多少），不是拓扑，推导它等于猜。同时设置 `VLLM_NUMA_NODES` 与 `VLLM_CPU_AFFINITY` 仍可绕过推导，这是给“该 node 的前 N 个 CPU 不归我们”的主机准备的答案。profile 也因此丢掉了 `CUDA_VISIBLE_DEVICES` 条目，它只是复述了 `run-vllm` 已经导出的 `VLLM_GPUS`。
+- 不可信的拓扑一律失败而不猜：GPU 跨两个 NUMA node、设备报告 `numa_node = -1`、node 的 CPU 数少于请求、GPU 索引越界，以及 `CUDA_DEVICE_ORDER` 不是 `PCI_BUS_ID`（那时索引根本不指这些设备）。
+- 证据/结果：验收条件被精确满足——本机 GPU 6,7 解析为 node 1 与 48-63，与它替换掉的值逐字节相同。对着真实 sysfs 验证，并用生产 profile 经记录器 dry-run `run-vllm`，其 `Cpus_allowed_list` 为 48-63。失败路径也对着真实拓扑走了一遍：GPU 3,4 跨 node 0 与 1，GPU 8 不存在，200 核放不进 node 1。
+
+### 拒绝主机未授予的 GPU（accepted）
+
+- 动机：这台机器八块 GPU 里有六块跑着其他租户 25–33 GiB 的负载，而在此之前，唯一挡住本服务碰它们的东西是一个 profile 里写对了的常量。把 CPU 与 NUMA 放置也从同一个常量推导出来之后，一个笔误的代价变大了：错的 GPU 集合现在还会连带放错 CPU 与内存。
+- 变更：`.env` 里的 `VLLM_HOST_GPUS` 陈述这台机器给了本服务哪些 GPU，`run-vllm` 在任何东西对该集合动手之前拒绝集合之外的任何 GPU。不设置即不限制，那是自有整机时正确的默认。没有启发式，没有误报；按整数索引成员判断，因此允许列表 10,11 不会放行 GPU 1。
+- 证据/结果：用生产 profile 加本机允许列表 dry-run 验证：6,7 解析为 node 1 / 48-63 并继续；一个要 0,1 的 profile 以 `GPU 0 is not in VLLM_HOST_GPUS (6,7)` 失败。
+
+### reasoning-effort alias 随 deployment 配置（accepted）
+
+- 动机：`gateway.py` 把 `reasoning_effort` 的 `high` 映射到 `xhigh`，是一个编译进共享代码的常量。那其实是关于**某一个 checkpoint 的 chat template** 的事实：对一个接受 `high` 的模型——大多数模型都接受——gateway 会把一个合法请求改写成模板会拒绝的请求，也就是说 README 自己的「新增或切换部署」流程带着一个静默的行为回归出厂。
+- 变更：改为 `VLLM_GATEWAY_REASONING_EFFORT_ALIAS`，放在 deployment profile 而不是 `.env`——它是被服务模型的属性，不是机器的属性。`run-gateway` 把它交给 gateway，共享前言先清掉它，因此一个对此只字未提的 profile 不会从残留环境里继承上一个模型的拼法。未设置即原样转发；格式非法在 import 时失败，而不是静默地不做别名。让普通流量免付 JSON 往返的原始字节预过滤保留，现在针对配置值。
+- 证据/结果：这是共享代码里最后一个模型专属常量。用生产 profile dry-run `run-gateway` 验证 alias 以 `high:xhigh` 到达，而省略它的 profile 即使环境里有残留值也保持未设置。49 项测试通过。
+
+### README 与 LOGBOOK 重写（accepted）
+
+- 动机：`README.md` 被指定为架构、安装、运维、客户端配置与验证的权威，却缺了上下文长度、KV 容量与精度决定，而且其中若干条陈述已被最近十五个 commit 作废；`LOGBOOK.md` 完全没有 2026-08-22 与 2026-08-23 两天，四个 phase 的取舍研究与那十五个 commit 全部未记录，同时一个已被推翻的「最终生产状态」标题坐在目录里，一份证据索引夹在两段历史之间。
+- 变更（README）：重新组织为 架构 → 上下文/精度/容量 → 配置边界 → 安装 → 运维 → 客户端与健康检查 → 新增或切换部署 → 验证与测量。补上原生 262,144 上下文、当前 1,358,930 GPU KV tokens / 5.18× 满长并发、FP8 e4m3 精度决定与其指针；补上重启会阻塞整个模型加载、启动限流与 `reset-failed` 恢复、gateway 对 `prompt_logprobs`/`echo` 的 400、`/dev/shm` 自动清扫、以及编译缓存的清理流程。更正 gateway 并发默认值、`.env` 与 profile 各自的职责、端口约定、以及验证命令中缺失的脚本与测试文件。研究数字与逐次实验一律不进 README。
+- 变更（LOGBOOK）：重组为 当前状态与权威来源 → 证据与产物路径 → 按日期的历史；三个同为 2026-08-21 的顶层小节合并为一个；补齐 2026-08-22 与 2026-08-23；修正九项已核实的文档缺陷——权威指向、被取代的「最终生产状态」标题、把 CPU/NUMA 放置归给 unit、`--model-path` 的错误 flag 名、`health_watchdog.sh` 的旧文件名、指向 README 不存在小节的引用、关于 AGENTS/CLAUDE 的失实断言、测试数量的自相矛盾，以及夹在文中的证据索引。
+- 证据/结果：README 自己的验证块逐字运行通过，49 项测试 OK；两份文档的内部引用全部落在真实存在的文件与小节上；文中每个数字都对着 profile、commit body、phase 文档或在跑的引擎核对过。未改 `scripts/`、`systemd/`、`config/`、`gateway.py`、`tests/`、`eval/`、`MEASUREMENT.md`，未重启任何服务。
+- 遗留（open）：
+  - Phase 4 的决定文档只在树外的 `~/vllm-study-results/p4/`，而在产精度正是靠它决定的；`eval/` 目前只有 Phase 1–3。按 Phase 1–3 的先例，它应当同样入库。
+  - `eval/FINAL_CONFIG.md` 的标题是「推荐的最终配置」，内容是 BF16 KV 加 `--kv-cache-memory-bytes 26000000000`。那是 Phase 2 的产物，已被 Phase 4 取代，但从标题读不出来。
+  - `MEASUREMENT.md`「What no phase measured」称自由生成推理正确性“在任何 phase 都没有跑过”，Phase 4 已关闭该缺口，该节需要更新。
+  - `CLAUDE.md`/`AGENTS.md` 的 Environment 仍称 profile 是 CPU/NUMA 放置的权威来源，且未提及 `.env` 里的 `VLLM_HOST_GPUS`。
+  - harness 的启动失败恢复目标已从会漂移的私有副本改为从 git HEAD 读取已提交的 profile，但 `MEASUREMENT.md` 的「Reproducing a cell」仍按旧做法叮嘱刷新私有副本。
