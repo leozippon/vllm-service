@@ -18,12 +18,12 @@
 | 位置 | 内容 |
 | --- | --- |
 | `eval/eval_suite.py` | 评测工具；与研究实际运行位置 `/Data2/lzp/vllm-eval/eval_suite.py` 逐字节一致 |
-| `eval/PHASE1_RESULTS.md`、`eval/PHASE2_RESULTS.md`、`eval/PHASE3_CALIBRATION.md`、`eval/PHASE3_RESULTS.md`、`eval/FINAL_CONFIG.md` | Phase 1–3 的研究决定文档 |
+| `eval/` 下的 `PHASE1_RESULTS.md`、`PHASE2_RESULTS.md`、`PHASE2_RECOMMENDATION.md`、`PHASE3_CALIBRATION.md`、`PHASE3_RESULTS.md`、`PHASE4_DESIGN.md`、`PHASE4_RESULTS.md` | Phase 1–4 的研究设计与决定文档；「当前是什么配置、为什么」只由 `PHASE4_RESULTS.md` 回答 |
 | `eval/reference/bf16-reference-traces.json` | trace-replay tier 的一次性 BF16 参考轨迹 |
 | `MEASUREMENT.md` | 测量规则与各 tier 的分辨力边界 |
 | `/Data2/lzp/vllm-eval/results/` | 2026-08-21 的 capture，见下表 |
 | `~/vllm-study-results/` | Phase 1–3 的逐 cell capture 与两份 incident 记录 |
-| `~/vllm-study-results/p4/` | Phase 4 的设计、结果与逐 cell 启动日志；逐题原始记录在 `/Data2/lzp/vllm-eval-p4/` |
+| `~/vllm-study-results/p4/` | Phase 4 的逐 cell 启动日志、分析 dump 与时间线（设计与结果已入库 `eval/`）；逐题原始记录与其工具在 `/Data2/lzp/vllm-eval-p4/` |
 | `/Data2/lzp/vllm-tuning/` | L20 kernel 调优候选、runs、logs；安装清单 `install-backup/20260821-084146/` |
 | `/Data2/lzp/vllm-runtime-py311-rollback-20260822T042507Z/` | venv 改名的回滚 bundle |
 | `~/rollback/engine-phase4-20260823T034829Z/` | 切换 FP8 KV 之前的 profile 副本 |
@@ -233,7 +233,7 @@
 
 - 事故与动机：`27000000000` 比引擎自己的“完全利用显存”锚点 26,055,386,624 高出 944 MB，超额占用设备。它在自己那次启动上活了下来，却在后来一次启动上以 `EngineDeadError` 杀死引擎——一次约 956 MiB 的分配正好撞上 peak activation。关键教训是失败点不在启动：过大的 KV 池在 CUDA graph capture 阶段才失败，所以一次“看起来成功”的启动完全不能证明这个值是安全的。
 - 变更：降到 `26000000000`，取回约 1 GiB 设备余量。
-- 证据/结果：容量 777,975 KV tokens / 2.97× 满长并发（不安全值为 807,188 / 3.08×）；负载差异不可测（aggregate +0.80%，long E2E p50 −1.85%，其余在噪声内）；对 BF16 参考的 drift 仍是 0.000000 / 0 flips，conformance 10/10。`eval/PHASE2_RESULTS.md`、`eval/FINAL_CONFIG.md`。
+- 证据/结果：容量 777,975 KV tokens / 2.97× 满长并发（不安全值为 807,188 / 3.08×）；负载差异不可测（aggregate +0.80%，long E2E p50 −1.85%，其余在噪声内）；对 BF16 参考的 drift 仍是 0.000000 / 0 flips，conformance 10/10。`eval/PHASE2_RESULTS.md`、`eval/PHASE2_RECOMMENDATION.md`（当时名为 `FINAL_CONFIG.md`）。
 - 拒绝 `fp8_per_token_head`（TRITON_ATTN）：它兑现了预测的 5.35× 容量，动态 per-token-head 定标完全不需要校准，也不产生任何 scale 警告——按精度它是好的。但它强制 TRITON_ATTN，而短 prompt TTFT p95 从 0.59 s 炸到 **6.97 s**，aggregate −3.5%、long TPOT +4.0%。**按性能拒绝，不是按精度拒绝**。
 - 拒绝 `int8_per_token_head`：deep tier 上是所有量化选项里最准的（2.08 pp），容量与上者相同，但最慢：aggregate −4.8%、long TPOT +5.5%、短 TTFT p95 6.06 s。
 - 拒绝 MTP（k=2）：在目标并发 4–8 上实测 aggregate −0.57%、long TPOT p50 **+7.2%**，与历史上并发 3 时记录的 +33.8% **符号相反**。接受率本身是健康的（整体 72.8%，每 draft 1.456 个 token，深度 1/2 为 81.5%/64.1%）——speculation 在 batch 8 上就是不划算。它另外吃掉 9% 容量，`min_p` 与 `logit_bias` 返回 400（conformance 8/10），还暴露一个未解释的缺陷：MTP + `prompt_logprobs` 在 30 篇 teacher-forced 重放文档里有 6 篇（198–466 prompt tokens）出现 86–100% 的 top-1 不一致与 9–12.5 nats 的散度，其余 24 篇正常。设计原本要求把 `min_p`/`logit_bias` 的破坏作为一个取舍抛给用户；既然没有任何收益可换，就没有需要问的问题。
@@ -350,9 +350,17 @@
 - 变更（README）：重新组织为 架构 → 上下文/精度/容量 → 配置边界 → 安装 → 运维 → 客户端与健康检查 → 新增或切换部署 → 验证与测量。补上原生 262,144 上下文、当前 1,358,930 GPU KV tokens / 5.18× 满长并发、FP8 e4m3 精度决定与其指针；补上重启会阻塞整个模型加载、启动限流与 `reset-failed` 恢复、gateway 对 `prompt_logprobs`/`echo` 的 400、`/dev/shm` 自动清扫、以及编译缓存的清理流程。更正 gateway 并发默认值、`.env` 与 profile 各自的职责、端口约定、以及验证命令中缺失的脚本与测试文件。研究数字与逐次实验一律不进 README。
 - 变更（LOGBOOK）：重组为 当前状态与权威来源 → 证据与产物路径 → 按日期的历史；三个同为 2026-08-21 的顶层小节合并为一个；补齐 2026-08-22 与 2026-08-23；修正九项已核实的文档缺陷——权威指向、被取代的「最终生产状态」标题、把 CPU/NUMA 放置归给 unit、`--model-path` 的错误 flag 名、`health_watchdog.sh` 的旧文件名、指向 README 不存在小节的引用、关于 AGENTS/CLAUDE 的失实断言、测试数量的自相矛盾，以及夹在文中的证据索引。
 - 证据/结果：README 自己的验证块逐字运行通过，49 项测试 OK；两份文档的内部引用全部落在真实存在的文件与小节上；文中每个数字都对着 profile、commit body、phase 文档或在跑的引擎核对过。未改 `scripts/`、`systemd/`、`config/`、`gateway.py`、`tests/`、`eval/`、`MEASUREMENT.md`，未重启任何服务。
-- 遗留（open）：
-  - Phase 4 的决定文档只在树外的 `~/vllm-study-results/p4/`，而在产精度正是靠它决定的；`eval/` 目前只有 Phase 1–3。按 Phase 1–3 的先例，它应当同样入库。
-  - `eval/FINAL_CONFIG.md` 的标题是「推荐的最终配置」，内容是 BF16 KV 加 `--kv-cache-memory-bytes 26000000000`。那是 Phase 2 的产物，已被 Phase 4 取代，但从标题读不出来。
-  - `MEASUREMENT.md`「What no phase measured」称自由生成推理正确性“在任何 phase 都没有跑过”，Phase 4 已关闭该缺口，该节需要更新。
-  - `CLAUDE.md`/`AGENTS.md` 的 Environment 仍称 profile 是 CPU/NUMA 放置的权威来源，且未提及 `.env` 里的 `VLLM_HOST_GPUS`。
-  - harness 的启动失败恢复目标已从会漂移的私有副本改为从 git HEAD 读取已提交的 profile，但 `MEASUREMENT.md` 的「Reproducing a cell」仍按旧做法叮嘱刷新私有副本。
+- 遗留：
+  - Phase 4 的决定文档只在树外的 `~/vllm-study-results/p4/`，而在产精度正是靠它决定的；`eval/` 目前只有 Phase 1–3。按 Phase 1–3 的先例，它应当同样入库。（已关闭，见下条）
+  - `eval/FINAL_CONFIG.md` 的标题是「推荐的最终配置」，内容是 BF16 KV 加 `--kv-cache-memory-bytes 26000000000`。那是 Phase 2 的产物，已被 Phase 4 取代，但从标题读不出来。（已关闭，见下条）
+  - `MEASUREMENT.md`「What no phase measured」称自由生成推理正确性“在任何 phase 都没有跑过”，Phase 4 已关闭该缺口，该节需要更新。（已关闭，见下条）
+  - harness 的启动失败恢复目标已从会漂移的私有副本改为从 git HEAD 读取已提交的 profile，但 `MEASUREMENT.md` 的「Reproducing a cell」仍按旧做法叮嘱刷新私有副本。（已关闭，见下条）
+  - `CLAUDE.md`/`AGENTS.md` 的 Environment 仍称 profile 是 CPU/NUMA 放置的权威来源，且未提及 `.env` 里的 `VLLM_HOST_GPUS`。**（仍开放，由用户单独处理）**
+
+### 关闭 Phase 4 与测量文档的遗留项（accepted）
+
+- 动机：上一条留下的五项遗留里有四项会让读者读到已经不成立的事实——决定在产精度的 Phase 4 文档不在树内、`eval/FINAL_CONFIG.md` 的标题自称是最终配置、`MEASUREMENT.md` 说自由生成正确性从未跑过、以及它仍按一份已被删除的私有副本描述 harness 的失败恢复路径。
+- 变更（`eval/`）：`PHASE4_DESIGN.md` 与 `PHASE4_RESULTS.md` 由 `~/vllm-study-results/p4/` 入库。设计逐字节原样——它在第一次比较运行之前冻结，这一性质本身是证据的一部分。结果只动两处：指向设计文档与 p4 产物的路径改为在 `eval/` 里能解析的形式，以及当时留下的两条交接注记标为已关闭（profile 变更已作为 `62db0d9` 提交；harness 的私有恢复副本已删除）。`FINAL_CONFIG.md` 更名为 `PHASE2_RECOMMENDATION.md` 并在开头写明被取代——不新写一份「当前配置」文档：在产配置的权威是 profile，叙述在 `README.md`，日期与回滚在本文件，理由与证据在 `PHASE4_RESULTS.md`，`eval/` 里再放第五份只会以同样的方式过时。Phase 3 的建议小节加一行前指，因为它写着「现在跑的是 BF16」；四处失效的文档间引用一并修好。
+- 变更（`MEASUREMENT.md`）：「What no phase measured」重写，写清两个 tier 现在是什么、能分辨到什么程度（正确性在实测 5–7% 不一致率下 80% power 可检出 3.4 pp；长驻留 800 步全对把深 decode 步骤错误率单侧压到 0.38 pp），以及仍然没测的三件事（agentic 多轮编码本机无可评分数据、小于约 3 pp 的变化、持续数小时的生产流量），并如实写明这两个 tier 的工具**不在** `eval/eval_suite.py` 里，而在 `/Data2/lzp/vllm-eval-p4/`。「Reproducing a cell」第 1 步改写为现状：harness 用 `git show HEAD:` 恢复已提交的 profile，因此新增了对 git 历史与一个能启动的 `HEAD` profile 的依赖。另修两处已失效的陈述：gateway 的准入上限不是 4/8 而是默认 32/32，以及推理轨迹参考已作为 fixture 入库，不再「仓库里没有任何备份」。
+- 证据/结果：数字逐条核对——在跑的引擎自报 `fp8_e4m3`、FlashInfer、GPU KV 1,358,930 tokens、262,144 满长 5.18×；`gateway.py` 的默认值为 32/32；`/Data2/lzp/vllm-eval/known-good.conf` 已不存在，`restore_profile.sh` 从 `HEAD` 读取；`eval/eval_suite.py` 与研究运行位置仍逐字节一致。README 的验证块逐字运行通过，49 项测试 OK；被改文档的引用全部落在真实存在的文件上。未改 `README.md`、`scripts/`、`systemd/`、`config/`、`gateway.py`、`tests/`，未重启任何服务。
+- 未做/仍开放：Phase 4 的逐题原始记录与打分脚本仍在树外（体量与「评测生成物不入库」的既有决定），`MEASUREMENT.md` 已点明这一依赖；`CLAUDE.md`/`AGENTS.md` 的那一项由用户单独处理。
