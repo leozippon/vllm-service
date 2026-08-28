@@ -397,3 +397,12 @@
 - 附带发现：「证据与产物路径」表里的几个历史目录在磁盘上已不存在——`~/vllm-study-results/` 缺失，`/Data2/lzp/vllm-eval/` 在本次之前也不存在，其 `results/` 由本次重建。本条不改写那张表的历史行，只记录这一事实。
 - 决定/回滚：接受。回滚是一行加一次重启——把 `--kv-offloading-size` 改回 32 并重启 `vllm.service`；变更前的 profile 副本在 `~/rollback/kv-offload-64gib-20260828T105500Z/`，SHA-256 `f618004e…3198f`。因为编译缓存目录已被清掉且该参数进入 hash，回滚那次重启同样是冷编译，约 10 分钟。
 - 证据：`/Data2/lzp/vllm-eval/results/20260828-workload-offload-sizing/`；探针 JSON 在消费方 `logs/analysis/concurrency/bench_20260828T181748Z.json`。
+
+### 64 GiB offload tier 的中期观测：verdict 推迟（no change）
+
+- 观测：18:11:27Z 重启之后，新一轮四实验 18:28Z 启动，读数取到 19:24Z。本条只记录观测——未重启、未改 profile、未改 unit。
+- 数字：`vllm:external_prefix_cache_hits_total` = **0**，对 `vllm:external_prefix_cache_queries_total` = 1,374,055（协调方在 18:30–19:16Z 窗口内读到 0/1,031,151，自重启累计 0/1,361,645）。`vllm:prefix_cache_hits_total` / `vllm:prefix_cache_queries_total` = 12,507,936 / 13,881,991 = **90.10%**。`vllm:kv_offload_store_bytes_total` = 108.90 GB，`vllm:kv_offload_store_size_count` = 664，`vllm:kv_offload_cpu_allocation_size_sum` = **2,121** block，`vllm:kv_offload_lookup_sync_delay_seconds_count` = 402 且 `vllm:kv_offload_load_size_count` 无样本（一次 load 都没发生过）。`vllm:kv_cache_usage_perc` 瞬时 0.251（协调方窗口内约 0.055）。`vllm:num_preemptions_total` 0，`vllm:kv_offload_allocation_failure_total` 无样本。
+- 为什么 0% 还不是结论：tier **不是空的**——2,121 次 block 分配打进 1,337 个槽位，已经绕过 1.59 圈，写入路径完全正常。原因在读侧：`vllm:external_prefix_cache_queries_total` 与 `vllm:prompt_tokens_by_source_total{source="local_compute"}` 逐位相等（都是 1,374,055），即这一层只会被问到 GPU pool 未命中的那些 token。而这一轮上下文是全新的，1,358,930 token 的 GPU 池远未填满，还没有发生过 LRU 逐出，因此落到这一层的 402 次 lookup 全是**首次计算**的新内容（平均尾巴约 3.5k token），任何 tier 都不可能命中它们。本次变更针对的是重复 prefill，而这一轮到目前为止还没有产生过重复 prefill。
+- 本次观测新暴露的风险，如实记录：实测写入率 0.565 block/s（自本轮启动）与 0.485 block/s（自重启），对应 tier 完整翻转 **39–46 分钟**，短于变更时按 0.383 block/s 估出的约 58 分钟——新一轮正在建上下文，写得比稳态更快。若父上下文等待子任务的间隔超过约 40 分钟，即使 64 GiB 也可能在被问到之前就把该前缀丢掉。下次复核要连这一点一起判，而不是只看命中率。
+- 复核计划（预登记规则的执行条件）：等 GPU 侧真正发生逐出之后再判——即缓存的 distinct token 逼近 1,358,930、各实验上下文长到 100k+，本轮约 4–6 小时后。届时采样 `vllm:external_prefix_cache_hits_total`、`vllm:external_prefix_cache_queries_total`、`vllm:prefix_cache_hits_total`、`vllm:prefix_cache_queries_total`，加上 `vllm:kv_cache_usage_perc` 与 `vllm:kv_offload_cpu_allocation_size_sum`；确认 GPU 侧已逐出之后，再套用预登记规则——外部命中率若仍 <10%，就移除这一层，而不是继续加大。
+- 证据：`/Data2/lzp/vllm-eval/results/20260828-workload-offload-sizing/metrics_interim_1787945056.prom`。
