@@ -27,6 +27,8 @@
 | `/Data2/lzp/vllm-tuning/` | L20 kernel 调优候选、runs、logs；安装清单 `install-backup/20260821-084146/` |
 | `/Data2/lzp/vllm-runtime-py311-rollback-20260822T042507Z/` | venv 改名的回滚 bundle；其还原目标 `/Data/public/.venvs/vllm-runtime-py311` 已于 2026-08-23 迁入仓库 `.venv`，该 bundle 此后只作历史记录，不可直接执行 |
 | `~/rollback/engine-phase4-20260823T034829Z/` | 切换 FP8 KV 之前的 profile 副本 |
+| `/Data2/lzp/vllm-eval/results/20260828-workload-offload-sizing/` | 2026-08-28 offload 定尺寸的变更前后 Prometheus 快照、分析脚本、patch、verify runbook 与探针日志 |
+| `~/rollback/kv-offload-64gib-20260828T105500Z/` | offload 32 → 64 GiB 之前的 profile 副本 |
 | `~/rollback/venv-move-20260823T173204Z/` | venv 迁入仓库 `.venv` 的迁移前记录与回滚脚本 |
 
 `/Data2/lzp/vllm-eval/results/` 下 2026-08-21 的逐次 capture：
@@ -376,3 +378,22 @@
 - 证据（运行）：引擎 4 分 30 秒恢复 health，略长于常态，与清空 bytecode 后的重编译相符；两个 unit `active` 且 `NRestarts=0`。容量与迁移前逐位相同：GPU KV 1,358,930 tokens、262,144 满长 5.18×、`fp8_e4m3`、FlashInfer。backend `/health`、gateway `/health/live`、`/health/ready`、`/health` 与认证 models 均 200，未认证的 models 与 chat completions 均 401；经 gateway 的一次 `reasoning_effort=high` 返回 259 字符 reasoning 且答案正确，同一取值直连引擎返回 400，说明 alias 仍在生效。README 的验证块逐字运行通过，49 项测试 OK；`git status` 只含本次的 8 个文件，`.venv` 下任何路径都无法被 track，`.git` 仍为 1.8 MiB。
 - 附带发现：Coder 镜像的同步层按名字排除 `.venv/`，但并不遵循 `.gitignore`——实测同样被 git 忽略的 `.venv-synctest/` 被同步，而 `.venv/` 没有。因此 `.venv` 这个名字本身是必要条件，换成任何其它名字都会把 7.8 GiB 拖进镜像同步。
 - 决定/回滚：接受。`/Data/public/.venvs` 清空后已删除。回滚 bundle 为 `~/rollback/venv-move-20260823T173204Z/`，其 `rollback.sh` 执行反向原子改名、还原 venv 内路径、revert 本次 commit 并重启服务。
+
+## 2026-08-28
+
+### CPU KV offload 32 → 64 GiB（accepted）
+
+- 动机：消费方的四个 agent 实验是串行的长上下文会话链，上下文 50–180k 并在会话中增长，thinking on，约 78% wall-clock 在 decode。主要尾部风险是一次未命中的约 98k prefill：TTFT 约 37 s，期间其余每条流从约 30 tok/s 掉到约 0.63 tok/s。CPU offload tier 本应把被逐出的前缀救回来，实测却几乎从不命中。
+- 诊断：本模型是 hybrid，64 层里只有 16 层 full attention，每 token KV = 16 × 2 × 4 kv head × 256 dim × 1 B = 32,768 B（跨两个 TP rank 合计），block = 1568 token = 51.38 MB；由 9.108 TB / 177,387 block = 51,347,278 B/block 独立验证。于是 32 GiB tier 只有 668 block，而 GPU pool 是 867 block / 1,358,930 token——**L2 比 L1 还小**。被逐出的前缀在 CPU 里的历史深度比它刚失去的更浅，0.11% 的外部命中率是算术结果，不是缺陷。
+- 变更：`--kv-offloading-size 32` → `64`。profile 其余部分与 unit 均未改动。
+- 证据（变更前；661 s 窗口 + 5 天生命期）：GPU prefix 命中 96.95% / 91.94%；外部命中窗口内 0/122,193，生命期 158,368/140,815,061 = 0.11%；store 9.108 TB 对 load 5.805 GB = 1569:1，占用 3,081 s 传输时间；`num_preemptions_total` 0，offload 分配失败 0。TTFT p50 0.90 s、p95 13.6 s、p99 34.7 s。prefill 累计 57,936 s = 运行时长的 13.4%，其中 54% 落在占 6% 的 >10 s 请求上；计算 >20k token 的 1,839 个请求（7.6%）承担了全部 140.8 M 计算 token 的约 65%。
+- 尺寸依据：64 GiB = 1,337 block = 2.10 M token = GPU pool 的 1.54×，按实测 0.383 block/s 的写入率驻留约 58 分钟，覆盖父上下文等待子任务的时间尺度。恢复实测 16.4 GB/s = 499,084 token/s，重算约 2,430 token/s，快 205×。更大的 tier 不会增加写入：`v1/kv_offload/cpu/manager.py` 的 `prepare_store` 过滤掉已驻留的 key，写流量只会持平或下降。
+- 为什么不是 96/128/192 GiB：`/dev/shm` 共 252 GiB，其中另一租户泄漏了四个 34.32 GB 的 offload 区域（合计 137 GB），不属于我们也无法回收；回收自己那个之后可用约 125 GiB。64 GiB 用后尚余 61 GiB 且 cgroup 限额不必改；96 GiB 只余 29 GiB 并需要抬高 MemoryHigh/MemoryMax；2 小时驻留需要约 128 GiB，在本机拿不到。
+- 精度与长上下文不变：offload 路径是纯字节拷贝——`v1/kv_offload/cpu/gpu_worker.py` 断言 GPU 与 CPU 张量都是 `torch.int8` 的 page 视图，按指针/长度描述符搬运，没有 dtype 转换或重量化，恢复出来的 block 与被逐出的逐位相同。KV dtype、量化、定标、context 长度、sampler 与 speculative decoding 均未改动。上线后引擎自报容量与变更前逐位相同：GPU KV 1,358,930 tokens、262,144 满长 5.18×、`fp8_e4m3`。
+- 上线后核验：重启 613 s（11:01:14 发起 → 11:11:27 active），`init engine` 457.69 s，其中 `torch.compile` 166.53 s。这是一次冷编译：`~/.cache/vllm/torch_compile_cache` 在本次之前已被清空，而 `kv_offloading_size` 本身也进入 cache config hash，因此该目录无论如何都要重建。旧 32 GiB 区域由 `run-vllm` 回收，新区域 68,695,359,488 B（63.98 GiB），`/dev/shm` 192 GiB 已用、余 61 GiB。verify 全部通过：两个 unit active，engine `/health` 与 gateway `/health/live`、`/health/ready` 均 200，未认证的 engine `/v1/models` 401，gateway 列出模型，`kv_offloading_size=64.0`，一次经 gateway 的 `xhigh` 端到端补全 finish_reason stop 且答案正确，`num_preemptions_total` 0，`memory.events` 全零。cgroup 92.56 GiB，其中不可回收的是 anon 10.22 + shmem 64.87 = 75.09 GiB，其余约 17 GiB 是可回收 page cache，对 MemoryMax 128 GiB 仍余 52.9 GiB。49 项测试 OK。
+- 并发探针（引擎空载，61,577 token 共享前缀，added 1/4/8）：per-stream decode 40.13 / 34.84 / 30.58 tok/s，aggregate 38.8 / 132.6 / 224.0 tok/s，TTFT p50 0.38 / 0.75 / 1.48 s，`waiting_max` 0，preemption 0。这组数不能与变更前那条 `t ≈ 24.1 + 2.44·c` ms 的拟合直接比较：拟合是在四个实验在跑、上下文 50–180k 的混合负载下测的，本次是空载均匀前缀。它只说明 decode 伸缩健康、无回归。
+- 未被本次验证的部分，如实记录：prefill-interference 探针给出 cold TTFT 35.67 s、期间每流 0.610 tok/s，对比变更前约 37 s / 约 0.63 tok/s **基本没变，而这是预期的**——探针的冷 prompt 是新生成的唯一文本，任何 tier 都不可能命中它；本次变更针对的是**重复** prefill，不是首次 prefill。真正的验收指标是外部 prefix 命中率，而重启后 tier 是空的（当前 235,149 次查询 0 命中），需要 30–60 分钟真实实验流量才能读数。若在 64 GiB 下它仍低于约 10%，正确的下一步是**移除**这一层——它目前每 5 天花掉 3,081 s 传输时间只换到 0.11% 命中——而不是继续加大。
+- 未改动，及其理由：`--max-num-batched-tokens` 保持 8192，把它降到 4096 只是把停顿切碎而不是缩短它，且 16384 使 short c4 −19.64% 已有记录，与本次同窗口改动还会破坏归因。0.27.1 里 `long_prefill_token_threshold` 确实存在并按请求逐 step 截断 token（`v1/core/sched/scheduler.py:521`、`:899`），是停顿仍在时的下一个候选，需单独 A/B；`max_num_partial_prefills` 与 `max_long_partial_prefills` 在本 build 中不存在。`--max-num-seqs` 已两次被拒（8 与 32）且进入编译 hash；gateway 32/32 是失控保护而非节流器，cap 8 已被拒；`--gpu-memory-utilization` 0.92 不动；MTP 不在本次范围。
+- 附带发现：「证据与产物路径」表里的几个历史目录在磁盘上已不存在——`~/vllm-study-results/` 缺失，`/Data2/lzp/vllm-eval/` 在本次之前也不存在，其 `results/` 由本次重建。本条不改写那张表的历史行，只记录这一事实。
+- 决定/回滚：接受。回滚是一行加一次重启——把 `--kv-offloading-size` 改回 32 并重启 `vllm.service`；变更前的 profile 副本在 `~/rollback/kv-offload-64gib-20260828T105500Z/`，SHA-256 `f618004e…3198f`。因为编译缓存目录已被清掉且该参数进入 hash，回滚那次重启同样是冷编译，约 10 分钟。
+- 证据：`/Data2/lzp/vllm-eval/results/20260828-workload-offload-sizing/`；探针 JSON 在消费方 `logs/analysis/concurrency/bench_20260828T181748Z.json`。
