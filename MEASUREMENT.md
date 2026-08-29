@@ -97,7 +97,7 @@ Neither tier can show equivalence — a null result bounds a regression at that 
 
 **Sustained production traffic.** The longest continuous load ever run on the current FP8 configuration was the roughly 35-minute correctness sweep at concurrency 32. Multi-hour behaviour under real traffic has never been measured on any configuration.
 
-The KV offload tier is also nearly untested: it read zero bytes in every ordinary load run, and only a deliberate overload cell ever consulted it.
+The CPU KV offload tier no longer exists. It was measured under real multi-hour agent traffic on 2026-08-28, returned 4.59% of the lookups that reached it against 48x write amplification, and was removed; `LOGBOOK.md` carries the evidence.
 
 ## Reproducing a cell
 
