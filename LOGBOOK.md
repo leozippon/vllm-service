@@ -8,10 +8,10 @@
 
 ## 当前状态与权威来源
 
-- 运行时事实——Python 运行时、checkpoint、served name、engine 端口、GPU 集合、CPU 核预算、vLLM 参数与运行环境、gateway 的 reasoning-effort alias——以 `config/deployments/active` 选中的 deployment profile 为准。
-- CPU 与 NUMA 绑定不写在 profile 里。`scripts/resolve-placement` 每次启动从 GPU 集合经主机 sysfs 推导，`run-vllm` 把结果 numactl 到进程上并写进启动日志。systemd unit 不含任何 CPU/NUMA 指令。
+- 模型事实——checkpoint、served name、任务（generate / embed）、默认 TP 与上下文长度、默认 vLLM 参数、发布日期与知识截止——以 `config/profiles/<name>.conf` 为准。共享部署的事实——引用哪个 profile、engine 端口、GPU 集合、CPU 核预算、它在 profile 默认值之上叠加的启动选项、gateway 的 reasoning-effort alias——以 `config/deployments/active` 选中的 deployment 为准。Python 运行时（仓库内 `.venv/bin/python`）、运行环境变量与 `127.0.0.1` 绑定只由 `scripts/run-vllm` 给出。
+- CPU 与 NUMA 绑定不写在任何配置里。`scripts/resolve-placement` 每次启动从 GPU 集合经主机 sysfs 推导——共享部署取所在节点的前 `VLLM_CPU_CORES` 个核，按需实例取整个节点——`run-vllm` 把结果 numactl 到进程上并写进启动日志。systemd unit 不含任何 CPU/NUMA 指令。
 - unit 名称、重启与启动限流策略、cgroup 限额以 `systemd/` 下的 unit 为准。架构、安装、运维、客户端配置与验证以 `README.md` 为准；测量规则以 `MEASUREMENT.md` 为准；研究证据以 `eval/` 下的 phase 文档为准。
-- 在产容量与精度以引擎自己的启动日志为准，不以本文件的历史数字为准。最近一次影响它们的变更是 2026-08-23「Phase 4 与采用 FP8 KV cache」，当时实测 1,358,930 GPU KV tokens、262,144 满长上下文 5.18×。
+- 在产容量与精度以引擎自己的启动日志为准，不以本文件的历史数字为准。最近一次影响它们的变更是 2026-08-23「Phase 4 与采用 FP8 KV cache」，当时实测 1,358,930 GPU KV tokens、262,144 满长上下文 5.18×。2026-10-22 把配置拆成 profile 与 deployment，部署的有效参数逐项不变，但部署本身未在新布局下重启过（见当日条目）。
 
 ## 证据与产物路径
 
@@ -30,6 +30,7 @@
 | `/Data2/lzp/vllm-eval/results/20260828-workload-offload-sizing/` | 2026-08-28 offload 定尺寸的变更前后 Prometheus 快照、分析脚本、patch、verify runbook 与探针日志 |
 | `~/rollback/kv-offload-64gib-20260828T105500Z/` | offload 32 → 64 GiB 之前的 profile 副本 |
 | `~/rollback/venv-move-20260823T173204Z/` | venv 迁入仓库 `.venv` 的迁移前记录与回滚脚本 |
+| `/Data2/lzp/vllm-eval/results/20261022-profiles-instances/` | 2026-10-22 单卡实例验证的引擎日志（27B 的失败与成功两次、8B embedding、9B）、批量探针脚本与启动计时 |
 
 `/Data2/lzp/vllm-eval/results/` 下 2026-08-21 的逐次 capture：
 
@@ -431,3 +432,23 @@
 - compile cache 现有两个条目：64 GiB 的 `02d25764…`（657 MB）与本次 no-offload 的 `3e3f83fd…`（646 MB）。刻意先都留着——回滚窗口内保留前者能让回滚重启是热编译（约 4 分钟）而不是冷编译（约 10 分钟）。回滚窗口关闭后按 README 的办法剪掉多余条目。
 - 决定/回滚：接受。回滚为 `git revert` 本次 commit 加一次重启；变更前的 profile 副本另存在 `~/rollback/kv-offload-removal-20260828T193500Z/`，SHA-256 `f8487114…2576`。
 - 证据：`/Data2/lzp/vllm-eval/results/20260828-workload-offload-sizing/`（`metrics_post_removal.prom`、`verify-removal`、`probe-removal*.log`、`restart-timeline.txt`）；三次探针 JSON 在消费方 `logs/analysis/concurrency/`。
+
+## 2026-10-22
+
+### 模型 profile、按需实例与共享部署同源（accepted）
+
+- 动机：除了 GPU 6–7 上的共享部署，还需要在调用方已认领的单卡上按需起别的模型（27B 单卡、Qwen3.5 小模型、Qwen3 embedding），而且要和共享部署走同一条启动路径、同一份引擎参数，不能再复制一份 profile。共享部署自 2026-10-19 起停着，这次不得启动它，也不得碰 GPU 2–7。
+- 变更（配置）：引擎配置拆为两层。`config/profiles/<name>.conf` 只描述模型——checkpoint、served name、任务、默认 TP 与上下文、默认 vLLM 参数、发布日期、知识截止与一行说明；首批七个：`qwen-3.8-27b-fp8`（单卡、32,768、`fp8_e4m3` KV、prefix caching、`--max-num-seqs 128`、thinking 默认关）、`qwen-3.5-9b`/`4b`/`2b`/`0.8b`（BF16、原生 262,144、thinking 默认关）、`qwen3-embedding-8b`/`0.6b`（pooling，last-token 与归一化取自 checkpoint 的 sentence-transformers 配置）。发布日期取自各自 README 的引用（Qwen3.8 为 2026-08，Qwen3.5 为 2026-02，Qwen3-Embedding 为 2025-06，即 arXiv 2506.05176）；七份 README 都没有写知识截止，profile 里如实留空，`list-profiles` 输出 null。`config/deployments/qwen-3.8-27b-fp8.conf` 变成「引用 profile + 部署自己的覆盖」：端口 8010、GPU 6,7、16 核、`--tensor-parallel-size 2`、`--max-model-len 262144`、`--max-num-seqs 256`、thinking 默认开、alias `high:xhigh`。
+- 变更（脚本）：`run-vllm` 是唯一的启动器。带 `--profile/--gpus/--port`（可选 TP、上下文、显存比例与逐个 token 追加的 `--extra-arg`）时起一个前台实例，绑定 `127.0.0.1`，`CUDA_VISIBLE_DEVICES` 取给定的主机卡号，绑定这些卡所在的整个 NUMA 节点；不带参数时读 deployment，把它的覆盖翻译成同一组选项再走同一条路径。API key 仍只经环境变量传入；profile 参数与 extra 参数里出现启动器自己负责的选项（model、served name、host、port、runner、TP、上下文、显存比例、`--api-key`，含下划线写法）一律拒绝，保证每个参数只有一个来源；卡数必须等于 TP。解释器固定为仓库 `.venv/bin/python`，`CUDA_DEVICE_ORDER`、HF 离线与 `PATH` 从 profile 挪进 `run-vllm`。`resolve-placement` 的核数改为可选，缺省即整节点。新增 `list-profiles`，以 JSON 数组输出全部 profile；任何一个 profile 加载失败则整份输出失败、不打印半截。测试 49 → 60 项，新增参数解析、profile 加载、部署与实例同一路径、列表输出的用例，全部不起引擎、不碰 GPU。
+- 证据（部署等价，未启动）：用记录器替代解释器，分别跑旧 `main` 与新布局的部署路径，比较 vLLM argv 与环境。环境变量与绑定（node 1、CPU 48–63）完全相同；argv 只多出三处——显式 `--runner generate`（与 `auto` 解析结果相同）、`--max-num-seqs 128` 后接部署的 `256`、`--default-chat-template-kwargs` 先关后开。用 vLLM 自己的参数解析器读新 argv，有效值为 `max_num_seqs=256`（与 L20 上 vLLM 对 API server 的默认值相同）、`enable_thinking=True`（与 chat template 缺省相同）、TP 2、262,144、`fp8_e4m3`。按 MEASUREMENT.md 进入 compile hash 的量都没变，因此预期复用现有 `3e3f83fd…` 条目；但部署没有在新布局下重启过，这一点只是推断。
+- 证据（GPU 0，单卡实例）：每次启动前后 `nvidia-smi` 与 `free -h`，GPU 0 起止均为 0 MiB，`available` 从 442 GiB 降到 419 GiB，差额是同机其他进程。
+  - 27B 首次启动失败：单卡上 hybrid 模型的线性注意力状态只够 167 个序列，而 vLLM 在 L20 上默认 `max_num_seqs=256`，CUDA graph 捕获拒绝继续。profile 因此设 `--max-num-seqs 128`，部署重申 256。
+  - 27B 第二次启动：从启动到 `/health` 200 且 `/v1/models` 列出模型共 339 s。compile cache 冷（`--max-num-seqs` 进入 hash；torch.compile 150.0 s），权重已在 page cache 里（加载 9.7 s；首次失败那次约 17 / 30.9 GB 在缓存中，加载 37.9 s）。引擎自报：权重 28.51 GiB，可用 KV 8.45 GiB，GPU KV 213,598 tokens，32,768 满长 6.52×，CUDA graph 1.63 GiB，`init engine` 259.5 s；启动后占 40,611 MiB，压测后 43,183 MiB。未认证的 `/v1/models` 返回 401。
+  - 不带任何 thinking 字段、`temperature: 0` 的 chat completion 返回纯 content、`reasoning` 为 null、4 个 completion token；同一请求加 `"chat_template_kwargs": {"enable_thinking": true}` 后推理文本进入 `reasoning` 字段，content 只剩答案（前面带两个换行）。
+  - prompt 吞吐：20 个并发请求，每个约 1,000–1,030 prompt token、首 token 起互不相同（不命中 prefix cache）、`max_tokens: 1`，三轮各 20,335–20,383 token、6.61–6.67 s，即 3,053–3,078 prompt token/s。这是单卡、空载、短 prompt 的预填充上限，不代表混合负载。
+  - `qwen3-embedding-8b`：启动到就绪 105 s（compile 冷，38.8 s；权重 14.11 GiB），pooling 解析为 LAST 并归一化。一次请求 512 段短文本（共 8,594 token），客户端计时 3.62–3.79 s（含解析 45 MB 的 JSON 浮点），维度 4096，范数全为 1.0；同样的请求用 `encoding_format: base64` 为 1.59 s、11.2 MB，浮点格式只计传输为 2.78 s。
+  - `qwen-3.5-9b` 以原生 262,144 单卡启动的可行性：232 s 就绪，权重 17.66 GiB，GPU KV 666,043 tokens，满长 2.54×，chat completion 返回纯 content。其余三个 Qwen3.5 更小，未逐一启动。
+  - 每个实例都以 SIGTERM 发给进程组停止（27B 3 s、embedding 2 s 内整组退出），之后 GPU 0 回到 0 MiB；GPU 1–7 全程未用。
+- 清理：仓库内删除 `__pycache__`（根目录、`eval/`、`tests/`）与只含三个空目录的 `.pi/`，二者本就在 `.gitignore` 里；仓库外删除属于本用户的 `/Data/public/Qwen3.8-27B/.cache`（4.5G）与 `/Data/public/Qwen3.8-27B-FP8/.cache`（326M）两处未完成的下载残留、只含一个空日志的 `/Data/public/vllm-logs`，以及悬空的 `~/.config/systemd/user/timers.target.wants/qwen38-watchdog.timer`；compile cache 里删掉了首次失败留下的、单卡 256 序列这一永远起不来的配置条目，保留部署的 `3e3f83fd…` 与本次三个可用配置的条目。
+- 遗留，如实记录：profile 指向的模型目录有六个属于其他用户（`wjh`、`gz`、`wmm`），并且都在 `root:root` 0777、无 sticky bit 的 `/Data/public` 下——任何用户都能改名或替换这些目录项，与 2026-08-23 迁走 venv 时是同一个可篡改面，这次没有处理。按需实例的卡必须在同一个 NUMA 节点上（本机 0–3 或 4–7），跨节点 TP 会在启动前失败而不是退化绑定。共享部署在新布局下的首次重启需要人工确认引擎自报的容量与之前逐位相同。
+- 决定/回滚：接受。回滚为 `git revert` 本次三个 commit；部署未运行，回滚不需要重启。
