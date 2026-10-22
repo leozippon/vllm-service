@@ -4,18 +4,18 @@ set -euo pipefail
 
 # shellcheck source=/dev/null
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/_profile.sh"
+load_deployment
 
-[[ -n "${VLLM_PYTHON:-}" ]] || fail "VLLM_PYTHON is required in $PROFILE"
-[[ -x "$VLLM_PYTHON" ]] || fail "VLLM_PYTHON is not executable: $VLLM_PYTHON"
+[[ -x "$VLLM_PYTHON" ]] || fail "runtime interpreter is not executable: $VLLM_PYTHON"
 
 # One deployment owns a contiguous port pair: the engine port is declared in the
-# profile and the gateway answers on the next one. .env may still redirect the
+# deployment and the gateway answers on the next one. .env may still redirect the
 # upstream the gateway proxies to, which is what a remote engine would need.
 export VLLM_GATEWAY_UPSTREAM_URL="${VLLM_GATEWAY_UPSTREAM_URL:-http://127.0.0.1:$VLLM_PORT}"
 
 # The reasoning-effort alias is a fact about the served model's chat template,
-# so it travels with the deployment profile rather than with the machine: a
-# deployment switch must not leave a previous model's spelling behind.
+# so it travels with the deployment rather than with the machine: a deployment
+# switch must not leave a previous model's spelling behind.
 export VLLM_GATEWAY_REASONING_EFFORT_ALIAS="${VLLM_GATEWAY_REASONING_EFFORT_ALIAS:-}"
 
 cd -- "$REPO_ROOT"

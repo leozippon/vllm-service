@@ -9,11 +9,12 @@
 set -u
 
 # The probes follow the active deployment's port pair rather than a literal, so
-# they cannot outlive a port change. An unreadable profile exits non-zero, which
+# they cannot outlive a port change. An unreadable deployment exits non-zero, which
 # for a watchdog means "unhealthy this cycle" -- the honest answer when nothing
 # can say where the deployment should be answering.
 # shellcheck source=/dev/null
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/_profile.sh"
+load_deployment
 
 STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/vllm-watchdog"
 UPSTREAM_URL="${VLLM_WATCHDOG_UPSTREAM_URL:-http://127.0.0.1:$VLLM_PORT/health}"

@@ -1,93 +1,157 @@
 #!/usr/bin/env bash
+# Run one vLLM OpenAI-compatible server in the foreground.
+#
+#   run-vllm --profile <name> --gpus <i,j,...> --port <port>
+#            [--tensor-parallel-size N] [--max-model-len N]
+#            [--gpu-memory-utilization F] [--extra-arg <token>]...
+#
+# The server binds 127.0.0.1:<port> on the named host GPUs, using the model and
+# engine defaults of config/profiles/<name>.conf. Each --extra-arg appends one
+# token to vLLM's arguments after the profile's own, so it can override them.
+# VLLM_API_KEY, when set in the environment, is the key the server requires.
+#
+# Without arguments it runs the shared deployment: config/deployments/active
+# names a deployment, which names a profile and supplies the options above.
 
 set -euo pipefail
 
 # shellcheck source=/dev/null
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/_profile.sh"
 
-require_value() {
-    local name=$1
-    [[ -n "${!name:-}" ]] || fail "$name is required in $PROFILE"
-}
+USAGE="usage: run-vllm --profile <name> --gpus <i,j,...> --port <port> [--tensor-parallel-size N] [--max-model-len N] [--gpu-memory-utilization F] [--extra-arg <token>]..."
 
-require_array() {
-    local name=$1 declaration
-    declaration=$(declare -p "$name" 2>/dev/null) || fail "$name is required in $PROFILE"
-    [[ "$declaration" == "declare -a "* ]] || fail "$name must be a Bash array in $PROFILE"
-}
+if (($# == 0)); then
+    load_deployment
+    # The deployment's readiness gate asserts that unauthenticated requests are
+    # refused, so a deployment without a key would never become ready.
+    [[ -n "${VLLM_API_KEY:-}" ]] || fail "VLLM_API_KEY is required in the environment"
+    if [[ -z "${VLLM_NUMA_NODES:-}" || -z "${VLLM_CPU_AFFINITY:-}" ]]; then
+        [[ -n "${VLLM_CPU_CORES:-}" ]] || fail \
+            "VLLM_CPU_CORES is required in $DEPLOYMENT unless VLLM_NUMA_NODES and VLLM_CPU_AFFINITY are both set"
+    fi
+    [[ -n "${VLLM_PROFILE:-}" ]] || fail "VLLM_PROFILE is required in $DEPLOYMENT"
+    [[ -n "${VLLM_GPUS:-}" ]] || fail "VLLM_GPUS is required in $DEPLOYMENT"
+    set -- --profile "$VLLM_PROFILE" --gpus "$VLLM_GPUS" --port "$VLLM_PORT" \
+        ${VLLM_LAUNCH_ARGS[@]+"${VLLM_LAUNCH_ARGS[@]}"}
+else
+    # An instance binds to its GPUs' whole NUMA node. The core budget and an
+    # explicit binding are deployment policy and never arrive from the caller's
+    # environment.
+    unset VLLM_CPU_CORES VLLM_CPU_AFFINITY VLLM_NUMA_NODES
+fi
 
-for name in \
-    VLLM_PYTHON \
-    VLLM_MODEL_PATH \
-    VLLM_SERVED_MODEL_NAME \
-    VLLM_GPUS; do
-    require_value "$name"
+profile="" gpus="" port="" tp="" max_len="" gmu=""
+extra=()
+while (($# > 0)); do
+    case $1 in
+        --*=*) option=${1%%=*} value=${1#*=}; shift ;;
+        --*) option=$1; (($# >= 2)) || fail "$option needs a value; $USAGE"
+             value=$2; shift 2 ;;
+        *) fail "unexpected argument: $1; $USAGE" ;;
+    esac
+    case $option in
+        --profile) profile=$value ;;
+        --gpus) gpus=$value ;;
+        --port) port=$value ;;
+        --tensor-parallel-size) tp=$value ;;
+        --max-model-len) max_len=$value ;;
+        --gpu-memory-utilization) gmu=$value ;;
+        --extra-arg) extra+=("$value") ;;
+        *) fail "unknown option: $option; $USAGE" ;;
+    esac
 done
-require_array VLLM_RUNTIME_ENV
-require_array VLLM_ARGS
 
-[[ -x "$VLLM_PYTHON" ]] || fail "VLLM_PYTHON is not executable: $VLLM_PYTHON"
-[[ -d "$VLLM_MODEL_PATH" ]] || fail "VLLM_MODEL_PATH is not a directory: $VLLM_MODEL_PATH"
-[[ -n "${VLLM_API_KEY:-}" ]] || fail "VLLM_API_KEY is required in the environment"
-((${#VLLM_ARGS[@]} > 0)) || fail "VLLM_ARGS must not be empty in $PROFILE"
+[[ -n "$profile" && -n "$gpus" && -n "$port" ]] || fail "--profile, --gpus and --port are required; $USAGE"
+[[ "$gpus" =~ ^(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*$ ]] || \
+    fail "--gpus must be comma-separated GPU indices, got: $gpus"
+positive_integer "$port" && ((port <= 65535)) || fail "--port must be a TCP port, got: $port"
+[[ -z "$tp" ]] || positive_integer "$tp" || \
+    fail "--tensor-parallel-size must be a positive integer, got: $tp"
+[[ -z "$max_len" ]] || positive_integer "$max_len" || \
+    fail "--max-model-len must be a positive integer, got: $max_len"
+[[ -z "$gmu" || "$gmu" =~ ^(0?\.[0-9]+|1(\.0+)?)$ ]] || \
+    fail "--gpu-memory-utilization must be a fraction in (0, 1], got: $gmu"
+refuse_launcher_options "--extra-arg" ${extra[@]+"${extra[@]}"}
 
-# The profile says which GPUs this deployment wants; VLLM_HOST_GPUS says which
-# GPUs this machine has given the service. Most GPUs on a shared host belong to
-# someone else, and a wrong GPU set now also misplaces CPU and memory, so the
-# allowlist is checked before anything acts on it.
+load_profile "$profile"
+[[ -x "$VLLM_PYTHON" ]] || fail "runtime interpreter is not executable: $VLLM_PYTHON"
+tp=${tp:-$VLLM_TENSOR_PARALLEL_SIZE}
+max_len=${max_len:-$VLLM_MAX_MODEL_LEN}
+
+# One GPU per tensor-parallel rank: a mismatch either fails inside vLLM after a
+# long import or silently leaves a claimed GPU idle.
+IFS=, read -r -a gpu_list <<<"$gpus"
+((${#gpu_list[@]} == tp)) || fail \
+    "--gpus names ${#gpu_list[@]} GPU(s) but the tensor-parallel size is $tp; name one GPU per rank or pass --tensor-parallel-size"
+(($(printf '%s\n' "${gpu_list[@]}" | sort -u | wc -l) == ${#gpu_list[@]})) || \
+    fail "--gpus names a GPU twice: $gpus"
+
+# VLLM_HOST_GPUS, when set, states which GPUs this machine has given the
+# service. Most GPUs on a shared host belong to someone else, and a wrong GPU
+# set also misplaces CPU and memory, so it is checked before anything acts.
 if [[ -n "${VLLM_HOST_GPUS:-}" ]]; then
-    for gpu in ${VLLM_GPUS//,/ }; do
+    for gpu in "${gpu_list[@]}"; do
         [[ ",$VLLM_HOST_GPUS," == *",$gpu,"* ]] || \
             fail "GPU $gpu is not in VLLM_HOST_GPUS ($VLLM_HOST_GPUS)"
     done
 fi
 
-# VLLM_GPUS is the authority for device selection; an explicit
-# CUDA_VISIBLE_DEVICES in VLLM_RUNTIME_ENV still overrides it below.
-export CUDA_VISIBLE_DEVICES="$VLLM_GPUS"
+case $VLLM_TASK in
+    generate) runner=(--runner generate) ;;
+    embed) runner=(--runner pooling --convert embed) ;;
+esac
 
-for assignment in "${VLLM_RUNTIME_ENV[@]}"; do
-    [[ "$assignment" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || \
-        fail "invalid environment assignment in $PROFILE: $assignment"
-    export "$assignment"
-done
+# GPU indices are host indices as nvidia-smi numbers them, which CUDA follows
+# only in PCI bus order. Profiles name local checkpoints, so nothing may reach
+# for the network, and the runtime's own tools come first on PATH.
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export CUDA_VISIBLE_DEVICES="$gpus"
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+export PATH="$REPO_ROOT/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# A profile written on one machine must not carry another machine's core
-# numbering, so the NUMA node and the CPU pool are derived from the GPU set
-# through the host's own topology. VLLM_CPU_CORES is a policy number -- how much
-# of that node this deployment may take on a shared host -- and stays explicit.
-# Setting both VLLM_NUMA_NODES and VLLM_CPU_AFFINITY in the profile bypasses the
-# derivation. The resulting binding is logged as part of the boot record.
+# A placement written on one machine must not carry another machine's core
+# numbering, so the NUMA node and CPU pool are derived from the GPUs through the
+# host's own topology: the node's first VLLM_CPU_CORES CPUs for the deployment,
+# whose core budget is policy on a shared host, and the whole node for an
+# instance. A deployment setting both VLLM_NUMA_NODES and VLLM_CPU_AFFINITY
+# bypasses the derivation. The binding is logged as part of the boot record.
 if [[ -z "${VLLM_NUMA_NODES:-}" || -z "${VLLM_CPU_AFFINITY:-}" ]]; then
-    [[ -n "${VLLM_CPU_CORES:-}" ]] || fail \
-        "VLLM_CPU_CORES is required in $PROFILE unless VLLM_NUMA_NODES and VLLM_CPU_AFFINITY are both set"
-    placement=$("$SCRIPT_DIR/resolve-placement" "$VLLM_GPUS" "$VLLM_CPU_CORES")
+    placement=$("$SCRIPT_DIR/resolve-placement" "$gpus" ${VLLM_CPU_CORES:+"$VLLM_CPU_CORES"})
     read -r VLLM_NUMA_NODES VLLM_CPU_AFFINITY <<<"$placement"
 fi
+printf 'run-vllm: profile=%s model=%s served=%s task=%s port=%s tensor-parallel=%s max-model-len=%s\n' \
+    "$profile" "$VLLM_MODEL_PATH" "$VLLM_SERVED_MODEL_NAME" "$VLLM_TASK" "$port" "$tp" "$max_len"
 printf 'run-vllm: placement node=%s cpus=%s (gpus %s)\n' \
-    "$VLLM_NUMA_NODES" "$VLLM_CPU_AFFINITY" "$VLLM_GPUS"
+    "$VLLM_NUMA_NODES" "$VLLM_CPU_AFFINITY" "$gpus"
+[[ -n "${VLLM_API_KEY:-}" ]] || \
+    printf 'run-vllm: VLLM_API_KEY is not set; the server accepts unauthenticated requests\n' >&2
 
-# vLLM only unlinks its /dev/shm CPU KV offload region on a clean shutdown path
-# that SIGTERM never reaches, so every restart leaks one region. Reclaim the
-# orphans before allocating a new one. A reclamation error is reported but must
-# not keep the engine from serving.
+# vLLM only unlinks a /dev/shm CPU KV offload region on a clean shutdown path
+# that SIGTERM never reaches, so a configuration that offloads leaks one region
+# per restart. Reclaim the orphans before starting. A reclamation error is
+# reported but must not keep the engine from serving.
 "$SCRIPT_DIR/reclaim-offload-regions" || \
     printf 'run-vllm: offload region reclamation failed; continuing\n' >&2
 
-# nvidia-smi must fail fast if the driver is unusable; free -h records the host
-# memory state in the journal.
+# nvidia-smi must fail fast if the driver is unusable; both record the GPU and
+# host memory state in the log.
 /usr/bin/nvidia-smi
 /usr/bin/free -h
 
-# VLLM_API_KEY is handed to vLLM through its environment default and never as
+# VLLM_API_KEY reaches vLLM through its environment default and never as
 # --api-key: /proc/<pid>/cmdline is world-readable on this shared host, and vLLM
-# echoes its parsed arguments into the journal. Enforcement is asserted at every
-# start instead, by the readiness gate.
+# echoes its parsed arguments into the log.
 exec /usr/bin/numactl \
     --physcpubind="$VLLM_CPU_AFFINITY" \
     --membind="$VLLM_NUMA_NODES" \
     "$VLLM_PYTHON" -m vllm.entrypoints.openai.api_server \
     --model "$VLLM_MODEL_PATH" \
     --served-model-name "$VLLM_SERVED_MODEL_NAME" \
-    --port "$VLLM_PORT" \
-    "${VLLM_ARGS[@]}"
+    --host 127.0.0.1 \
+    --port "$port" \
+    "${runner[@]}" \
+    --tensor-parallel-size "$tp" \
+    --max-model-len "$max_len" \
+    ${gmu:+--gpu-memory-utilization "$gmu"} \
+    "${VLLM_ARGS[@]}" \
+    ${extra[@]+"${extra[@]}"}

@@ -16,11 +16,12 @@
 
 set -u
 
-# The gate probes the port the profile told the engine to bind, so the two
-# cannot drift. An unreadable profile fails the start, which is the honest
+# The gate probes the port the deployment told the engine to bind, so the two
+# cannot drift. An unreadable deployment fails the start, which is the honest
 # outcome: nothing can say where the engine should be answering.
 # shellcheck source=/dev/null
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/_profile.sh"
+load_deployment
 
 URL="${VLLM_READY_URL:-http://127.0.0.1:$VLLM_PORT/health}"
 INTERVAL="${VLLM_READY_INTERVAL_SECONDS:-5}"

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Print every profile in config/profiles as a JSON array, one object per
+# profile: name, served_model_name, task, model_path, weights_bytes (the
+# checkpoint's safetensors on disk), tensor_parallel_size and max_model_len (the
+# launcher's defaults), release_date, knowledge_cutoff (null when the model's
+# documentation states none), and note. A profile that does not load fails the
+# whole listing, before anything is printed.
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/_profile.sh"
+
+shopt -s nullglob
+confs=("$PROFILES_DIR"/*.conf)
+((${#confs[@]} > 0)) || fail "no profiles in $PROFILES_DIR"
+
+objects=()
+for conf in "${confs[@]}"; do
+    name=${conf##*/}
+    name=${name%.conf}
+    objects+=("$(
+        load_profile "$name"
+        weights=("$VLLM_MODEL_PATH"/*.safetensors)
+        ((${#weights[@]} > 0)) || fail "no safetensors weights in $VLLM_MODEL_PATH"
+        bytes=0
+        for size in $(stat -L -c %s -- "${weights[@]}"); do
+            ((bytes += size))
+        done
+        jq -n \
+            --arg name "$name" \
+            --arg served "$VLLM_SERVED_MODEL_NAME" \
+            --arg task "$VLLM_TASK" \
+            --arg path "$VLLM_MODEL_PATH" \
+            --argjson bytes "$bytes" \
+            --argjson tp "$VLLM_TENSOR_PARALLEL_SIZE" \
+            --argjson len "$VLLM_MAX_MODEL_LEN" \
+            --arg release "$VLLM_RELEASE_DATE" \
+            --arg cutoff "${VLLM_KNOWLEDGE_CUTOFF:-}" \
+            --arg note "$VLLM_NOTE" \
+            '{name: $name, served_model_name: $served, task: $task,
+              model_path: $path, weights_bytes: $bytes,
+              tensor_parallel_size: $tp, max_model_len: $len,
+              release_date: $release,
+              knowledge_cutoff: (if $cutoff == "" then null else $cutoff end),
+              note: $note}'
+    )")
+done
+printf '%s\n' "${objects[@]}" | jq -s .

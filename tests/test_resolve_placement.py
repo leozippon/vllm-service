@@ -31,7 +31,7 @@ class ResolvePlacementTests(unittest.TestCase):
     def resolve(
         self,
         gpus: str,
-        cores: str,
+        cores: str | None,
         *,
         gpu_nodes: list[int] | None = None,
         cpulists: dict[int, str] | None = None,
@@ -43,7 +43,7 @@ class ResolvePlacementTests(unittest.TestCase):
             HOST_CPULISTS if cpulists is None else cpulists,
         )
         return subprocess.run(
-            [RESOLVE, gpus, cores],
+            [RESOLVE, gpus] + ([] if cores is None else [cores]),
             env={
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "VLLM_SYSFS_ROOT": str(sysfs),
@@ -59,6 +59,12 @@ class ResolvePlacementTests(unittest.TestCase):
         result = self.resolve("6,7", "16")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "1 48-63")
+
+    def test_without_a_budget_the_whole_node_is_the_pool(self) -> None:
+        """An instance takes its GPUs' node; only a deployment states a budget."""
+        result = self.resolve("6,7", None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "1 48-95,144-191")
 
     def test_a_split_pool_comes_back_as_ranges(self) -> None:
         """numactl takes either form; a range is what an operator would write."""

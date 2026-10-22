@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # Derive CPU and NUMA placement for a GPU set from this host's own topology.
 #
-#   usage: resolve-placement <gpu-list> <cpu-cores>   ->  "<numa-node> <cpu-list>"
+#   usage: resolve-placement <gpu-list> [<cpu-cores>]   ->  "<numa-node> <cpu-list>"
 #
-# A deployment profile written on one machine must not carry another machine's
+# A configuration written on one machine must not carry another machine's
 # core numbering, because the wrong binding fails silently: a wrong node costs
-# cross-socket memory bandwidth for the life of the deployment and nothing
-# reports it. VLLM_GPUS is the one placement fact the operator states, and both
+# cross-socket memory bandwidth for the life of the engine and nothing
+# reports it. The GPU set is the one placement fact a caller states, and both
 # the NUMA node and the CPU pool follow from it through sysfs.
 #
-# The core count stays explicit. It is a policy fact -- how much of that node
-# this deployment may take on a shared host -- not a topology fact, and deriving
-# it would be guessing. "The first N CPUs of the node" is itself a policy guess;
-# it is right on this host, and setting VLLM_NUMA_NODES and VLLM_CPU_AFFINITY in
-# the profile bypasses the derivation entirely for where it is not.
+# The core count is never derived. It is a policy fact -- how much of that node
+# a deployment may take on a shared host -- not a topology fact, and deriving it
+# would be guessing. Given a count, the CPU list is the node's first N CPUs,
+# itself a policy choice that is right on this host; setting VLLM_NUMA_NODES and
+# VLLM_CPU_AFFINITY in a deployment bypasses the derivation where it is not.
+# Without a count the CPU list is the whole node.
 #
 # Where the topology cannot be trusted this fails rather than guessing.
 # VLLM_SYSFS_ROOT overrides the sysfs root; it exists so the tests can present a
@@ -28,10 +29,10 @@ fail() {
     exit 1
 }
 
-(($# == 2)) || fail "usage: resolve-placement <gpu-list> <cpu-cores>"
+(($# == 1 || $# == 2)) || fail "usage: resolve-placement <gpu-list> [<cpu-cores>]"
 gpus=$1
-cores=$2
-[[ "$cores" =~ ^[1-9][0-9]*$ ]] || \
+cores=${2-}
+[[ $# == 1 || "$cores" =~ ^[1-9][0-9]*$ ]] || \
     fail "CPU core count must be a positive integer, got: $cores"
 
 # CUDA numbers devices by PCI bus id only under CUDA_DEVICE_ORDER=PCI_BUS_ID.
@@ -60,12 +61,16 @@ for gpu in ${gpus//,/ }; do
     if [[ -z "$node" ]]; then
         node=$gpu_node
     elif [[ "$gpu_node" != "$node" ]]; then
-        fail "GPUs $gpus span NUMA nodes $node and $gpu_node; set VLLM_NUMA_NODES and VLLM_CPU_AFFINITY explicitly"
+        fail "GPUs $gpus span NUMA nodes $node and $gpu_node; choose GPUs on one node, or set VLLM_NUMA_NODES and VLLM_CPU_AFFINITY in the deployment"
     fi
 done
 
 cpulist_file="$SYSFS/devices/system/node/node$node/cpulist"
 read -r cpulist < "$cpulist_file" || fail "cannot read $cpulist_file"
+if [[ -z "$cores" ]]; then
+    printf '%s %s\n' "$node" "$cpulist"
+    exit 0
+fi
 
 cpus=()
 for range in ${cpulist//,/ }; do
